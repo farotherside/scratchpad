@@ -7,7 +7,7 @@ Designed for cron invocation; all output is written to run_logs/.
 
 Usage
 -----
-    python run.py [--config config.json]
+    LEXENG_GH_PAT=<token> python run.py [--config config.json]
 
 The script will:
   1. Run the TransductionPipeline
@@ -38,6 +38,7 @@ import os
 import subprocess
 import sys
 import pathlib
+import urllib.parse
 
 ROOT = pathlib.Path(__file__).parent.resolve()
 
@@ -55,6 +56,22 @@ def _git(*args: str, cwd: str = str(ROOT)) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)!r} failed:\n{result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def _ensure_authed_remote() -> None:
+    """If LEXENG_GH_PAT is set, rewrite the origin URL to embed the token."""
+    pat = os.environ.get("LEXENG_GH_PAT", "").strip()
+    if not pat:
+        return
+    current = _git("remote", "get-url", "origin")
+    # strip any existing embedded credentials
+    parsed = urllib.parse.urlparse(current)
+    clean = parsed._replace(netloc=f"{urllib.parse.quote(pat, safe='')}@{parsed.hostname}{':' + str(parsed.port) if parsed.port else ''}{parsed.path.split('@')[-1] if '@' in parsed.path else ''}").geturl()
+    # simpler: just rebuild from the path
+    path = parsed.path  # e.g. /farotherside/scratchpad.git
+    host = parsed.hostname  # github.com
+    authed = f"https://{urllib.parse.quote(pat, safe='')}@{host}{path}"
+    _git("remote", "set-url", "origin", authed)
 
 
 def main() -> int:
@@ -85,6 +102,8 @@ def main() -> int:
             print(f"  [dry] {a['transform']:10s} {a['file']!r}")
             print(f"        {a['message']}")
         return 0
+
+    _ensure_authed_remote()
 
     # Stage and commit each action individually for a richer graph
     for a in actions:
