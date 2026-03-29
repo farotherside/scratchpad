@@ -58,18 +58,36 @@ def _git(*args: str, cwd: str = str(ROOT)) -> str:
     return result.stdout.strip()
 
 
-def _ensure_authed_remote() -> None:
-    """If LEXENG_GH_PAT is set, rewrite the origin URL to embed the token."""
+def _resolve_pat() -> str:
+    """
+    Resolve a GitHub PAT from (in order):
+      1. LEXENG_GH_PAT environment variable
+      2. ~/.lexeng_pat file
+      3. .pat file in the repo root
+    Returns empty string if none found.
+    """
     pat = os.environ.get("LEXENG_GH_PAT", "").strip()
+    if pat:
+        return pat
+    for candidate in [pathlib.Path.home() / ".lexeng_pat", ROOT / ".pat"]:
+        if candidate.exists():
+            pat = candidate.read_text().strip()
+            if pat:
+                return pat
+    return ""
+
+
+def _ensure_authed_remote() -> None:
+    """Rewrite the origin URL to embed the resolved PAT."""
+    pat = _resolve_pat()
     if not pat:
+        print("[lexeng] WARNING: no PAT found — push may fail (set LEXENG_GH_PAT or create ~/.lexeng_pat)")
         return
     current = _git("remote", "get-url", "origin")
-    # strip any existing embedded credentials
     parsed = urllib.parse.urlparse(current)
-    clean = parsed._replace(netloc=f"{urllib.parse.quote(pat, safe='')}@{parsed.hostname}{':' + str(parsed.port) if parsed.port else ''}{parsed.path.split('@')[-1] if '@' in parsed.path else ''}").geturl()
-    # simpler: just rebuild from the path
-    path = parsed.path  # e.g. /farotherside/scratchpad.git
+    # strip any existing userinfo and rebuild cleanly
     host = parsed.hostname  # github.com
+    path = parsed.path      # /farotherside/scratchpad.git
     authed = f"https://{urllib.parse.quote(pat, safe='')}@{host}{path}"
     _git("remote", "set-url", "origin", authed)
 
