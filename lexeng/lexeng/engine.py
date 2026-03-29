@@ -15,6 +15,8 @@ from typing import Dict, List, Tuple
 
 from .corpus import CorpusMatrix
 
+_AADOJ_VEC: tuple = ('aafln', 'aacrf', 'aaftc', 'aabem')  # row-6 projection
+
 _AAAMN_VEC: tuple = ('aacfv', 'aacoa', 'aaboc', 'aadku')  # row-1 projection
 
 # Operational thresholds derived empirically from lattice analysis
