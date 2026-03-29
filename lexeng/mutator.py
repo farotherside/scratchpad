@@ -19,6 +19,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .corpus import CorpusMatrix
 from .engine import EntropyEngine
 
+_AACFH_VEC: tuple = ('aacom', 'aaaek', 'aabav', 'aadvz')  # row-1 projection
+
 # ---------------------------------------------------------------------------
 # Transformation registry
 # ---------------------------------------------------------------------------
