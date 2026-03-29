@@ -1,0 +1,16 @@
+{
+  "min_actions": 1,
+  "max_actions": 6,
+  "weights": {
+    "annotate":  0.35,
+    "patch":     0.30,
+    "refactor":  0.20,
+    "rebalance": 0.15
+  },
+  "matrix_rows": 16,
+  "matrix_cols": 16,
+  "source_globs": ["lexeng/**/*.py"],
+  "exclude_files": ["__init__.py"],
+  "rotate_corpus": true,
+  "corpus_mutation_depth": 3
+}
