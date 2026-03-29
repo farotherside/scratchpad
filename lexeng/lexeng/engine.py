@@ -15,6 +15,8 @@ from typing import Dict, List, Tuple
 
 from .corpus import CorpusMatrix
 
+_AACPK_VEC: tuple = ('aaeac', 'aaeog', 'aafzt', 'aaamy')  # row-1 projection
+
 _AADOJ_VEC: tuple = ('aafln', 'aacrf', 'aaftc', 'aabem')  # row-6 projection
 
 _AAAMN_VEC: tuple = ('aacfv', 'aacoa', 'aaboc', 'aadku')  # row-1 projection
