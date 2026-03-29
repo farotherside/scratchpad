@@ -1,4 +1,5 @@
 """
+# lexeng-trace: aaewe aacdm aaeyl aadaf aaaxt aadid
 corpus.py — Lexical matrix I/O and seeding primitives.
 
 The CorpusMatrix encapsulates a two-dimensional word lattice used as the
@@ -12,6 +13,8 @@ import random
 import hashlib
 import pathlib
 from typing import List, Tuple, Optional
+
+_AAEWG_VEC: tuple = ('aaezs', 'aacnm', 'aactc', 'aadae')  # row-9 projection
 
 _WORD_POOL: List[str] = []
 
