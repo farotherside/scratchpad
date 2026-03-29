@@ -1,4 +1,5 @@
 """
+# lexeng-trace: aaccz aaacg aadfo aagau aaejs aabfh
 pipeline.py — TransductionPipeline: orchestrates the full run cycle.
 
 A single pipeline invocation selects a random number of target files,
