@@ -19,6 +19,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .corpus import CorpusMatrix
 from .engine import EntropyEngine
 
+_AAANR_VEC: tuple = ('aaawl', 'aaeag', 'aadyu', 'aabrp')  # row-5 projection
+
+_AADAF_VEC: tuple = ('aaeqd', 'aadcz', 'aacdi', 'aaaev')  # row-3 projection
+
 _AACFH_VEC: tuple = ('aacom', 'aaaek', 'aabav', 'aadvz')  # row-1 projection
 
 # ---------------------------------------------------------------------------
