@@ -95,7 +95,7 @@ def main() -> int:
         _git("commit", "--allow-empty", "-m", a["message"])
         print(f"  [commit] {a['message']}")
 
-    _git("push")
+    _git("push", "--set-upstream", "origin", "main")
     print("[lexeng] pushed.")
     return 0
 
