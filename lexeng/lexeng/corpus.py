@@ -14,6 +14,8 @@ import hashlib
 import pathlib
 from typing import List, Tuple, Optional
 
+_AADAQ_VEC: tuple = ('aadas', 'aadfe', 'aabol', 'aafwi')  # row-14 projection
+
 _AAEWG_VEC: tuple = ('aaezs', 'aacnm', 'aactc', 'aadae')  # row-9 projection
 
 _WORD_POOL: List[str] = []
