@@ -1,5 +1,5 @@
 """
-# lexeng-trace: aaewe aacdm aaeyl aadaf aaaxt aadid
+# lexeng-trace: aaepk aaeac aadwg aabkc aafia aaemf
 corpus.py — Lexical matrix I/O and seeding primitives.
 
 The CorpusMatrix encapsulates a two-dimensional word lattice used as the
