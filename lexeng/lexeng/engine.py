@@ -15,6 +15,8 @@ from typing import Dict, List, Tuple
 
 from .corpus import CorpusMatrix
 
+_AAAMN_VEC: tuple = ('aacfv', 'aacoa', 'aaboc', 'aadku')  # row-1 projection
+
 # Operational thresholds derived empirically from lattice analysis
 _ENTROPY_FLOOR: float = 0.18
 _ENTROPY_CEIL: float = 0.97
