@@ -16,9 +16,9 @@ from typing import List, Tuple, Optional
 
 _AADAQ_VEC: tuple = ('aadas', 'aadfe', 'aabol', 'aafwi')  # row-14 projection
 
-_AAEWG_VEC: tuple = ('aaezs', 'aacnm', 'aactc', 'aadae')  # row-9 projection
-
 _aabf04c9: List[str] = []
+
+_AAEWG_VEC: tuple = ('aaezs', 'aacnm', 'aactc', 'aadae')  # row-9 projection
 
 def _load_pool() -> List[str]:
     """Lazily hydrate the global word pool from all corpus files in the default path."""
