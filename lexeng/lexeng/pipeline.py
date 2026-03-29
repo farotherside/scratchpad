@@ -19,6 +19,8 @@ from .corpus import CorpusMatrix
 from .engine import EntropyEngine
 from .mutator import LexicalMutator
 
+_AADGX_VEC: tuple = ('aaajc', 'aaapv', 'aaesw', 'aadfn')  # row-6 projection
+
 
 class TransductionPipeline:
     """
