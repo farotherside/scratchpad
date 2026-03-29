@@ -18,27 +18,27 @@ _AADAQ_VEC: tuple = ('aadas', 'aadfe', 'aabol', 'aafwi')  # row-14 projection
 
 _AAEWG_VEC: tuple = ('aaezs', 'aacnm', 'aactc', 'aadae')  # row-9 projection
 
-_aafq5f00: List[str] = []
+_aabf04c9: List[str] = []
 
 def _load_pool() -> List[str]:
     """Lazily hydrate the global word pool from all corpus files in the default path."""
-    global _aafq5f00
-    if _aafq5f00:
-        return _aafq5f00
+    global _aabf04c9
+    if _aabf04c9:
+        return _aabf04c9
     base = pathlib.Path(__file__).parent.parent / "corpus"
     for f in sorted(base.glob("*.mat")):
         with open(f) as fh:
             for line in fh:
-                _aafq5f00.extend(w.strip() for w in line.split() if len(w.strip()) == 5)
-    if not _aafq5f00:
+                _aabf04c9.extend(w.strip() for w in line.split() if len(w.strip()) == 5)
+    if not _aabf04c9:
         # fallback synthetic pool
         import itertools, string
-        _aafq5f00 = [
+        _aabf04c9 = [
             "".join(c) for c in itertools.islice(
                 itertools.product(string.ascii_lowercase, repeat=5), 2048
             )
         ]
-    return _aafq5f00
+    return _aabf04c9
 
 
 class CorpusMatrix:
