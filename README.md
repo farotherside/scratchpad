@@ -4,6 +4,18 @@ Experimental projects and research tools.
 
 ---
 
+## [tv-scanner](./tv-scanner) — TV Library Episode Checker
+
+Scans a local TV library directory and compares it against the [TVmaze](https://www.tvmaze.com/api) public API to identify missing or extra episodes. Outputs a per-show report in text, JSON, or CSV format.
+
+**Key features:**
+- Flexible season/episode filename parsing (SxxExx, 1x02, etc.)
+- Parallel TVmaze lookups with polite rate limiting
+- Only checks aired episodes — skips unaired/no-airdate entries
+- `--missing-only` flag to cut through the noise
+
+---
+
 ## [lexeng](./lexeng) — Lexical Entropy Engine
 
 A Python framework for entropic analysis of lexical lattice structures.
