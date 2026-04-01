@@ -10,6 +10,7 @@ Options:
     --missing-only             Only show shows/episodes that have gaps
     --no-ended                 Skip shows whose status is Ended / To Be Determined
     --workers N                Parallel TVmaze workers (default: 4)
+    --no-color                 Disable color output
 
 Directory structure expected:
     <root>/
@@ -48,6 +49,78 @@ VIDEO_EXTS = {
     ".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv",
     ".mpg", ".mpeg", ".ts", ".m2ts", ".vob", ".divx",
 }
+
+# ---------------------------------------------------------------------------
+# Color support
+# ---------------------------------------------------------------------------
+
+def _detect_color_support() -> bool:
+    """Return True if the terminal appears to support ANSI color."""
+    if not sys.stdout.isatty():
+        return False
+    # Explicit opt-in signals
+    colorterm = os.environ.get("COLORTERM", "").lower()
+    if colorterm in ("truecolor", "24bit", "256color", "yes"):
+        return True
+    term = os.environ.get("TERM", "").lower()
+    term_program = os.environ.get("TERM_PROGRAM", "").lower()
+    # Common color-capable TERM values
+    color_terms = {"xterm", "xterm-256color", "screen", "screen-256color",
+                   "tmux", "tmux-256color", "rxvt", "rxvt-unicode",
+                   "rxvt-unicode-256color", "linux", "vt100"}
+    if term in color_terms or "256color" in term or "color" in term:
+        return True
+    if term_program in ("iterm.app", "hyper", "vscode", "wezterm", "kitty", "alacritty"):
+        return True
+    return False
+
+
+# Module-level flag — set in main() after parsing --no-color
+USE_COLOR: bool = False
+
+
+class _C:
+    """ANSI escape codes. Only used when USE_COLOR is True."""
+    RESET         = "\033[0m"
+    BOLD          = "\033[1m"
+    DIM           = "\033[2m"
+    RED           = "\033[31m"
+    GREEN         = "\033[32m"
+    YELLOW        = "\033[33m"
+    BLUE          = "\033[34m"
+    CYAN          = "\033[36m"
+    BRIGHT_RED    = "\033[91m"
+    BRIGHT_GREEN  = "\033[92m"
+    BRIGHT_YELLOW = "\033[93m"
+    BRIGHT_CYAN   = "\033[96m"
+    BRIGHT_WHITE  = "\033[97m"
+
+
+def _col(code: str, text: str) -> str:
+    """Wrap text in an ANSI code + reset, if color is enabled."""
+    if not USE_COLOR:
+        return text
+    return f"{code}{text}{_C.RESET}"
+
+
+def _bold(text: str) -> str:
+    return _col(_C.BOLD, text)
+
+def _red(text: str) -> str:
+    return _col(_C.BRIGHT_RED, text)
+
+def _green(text: str) -> str:
+    return _col(_C.BRIGHT_GREEN, text)
+
+def _yellow(text: str) -> str:
+    return _col(_C.BRIGHT_YELLOW, text)
+
+def _cyan(text: str) -> str:
+    return _col(_C.BRIGHT_CYAN, text)
+
+def _dim(text: str) -> str:
+    return _col(_C.DIM, text)
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -208,17 +281,16 @@ def scan_local_library(root: Path) -> dict[str, list[LocalEpisode]]:
 # ---------------------------------------------------------------------------
 # TVmaze lookups
 # ---------------------------------------------------------------------------
-def search_show(show_name: str) -> Optional[dict]:
-    """Return best TVmaze show match or None."""
-    results = _request(f"{TVMAZE_BASE}/search/shows", params={"q": show_name})
-    if not results:
-        return None
-    # TVmaze returns results sorted by relevance score
-    return results[0]["show"]
+
+# Simple module-level cache so disambiguation + main fetch don't double-hit
+_episode_cache: dict[int, list[RemoteEpisode]] = {}
 
 
 def fetch_episodes(tvmaze_id: int) -> list[RemoteEpisode]:
-    """Fetch full episode list for a show."""
+    """Fetch full episode list for a show (cached)."""
+    if tvmaze_id in _episode_cache:
+        return _episode_cache[tvmaze_id]
+
     data = _request(f"{TVMAZE_BASE}/shows/{tvmaze_id}/episodes")
     episodes = []
     for ep in data:
@@ -233,7 +305,59 @@ def fetch_episodes(tvmaze_id: int) -> list[RemoteEpisode]:
                 name=ep.get("name", ""),
                 airdate=ep.get("airdate", ""),
             ))
+
+    _episode_cache[tvmaze_id] = episodes
     return episodes
+
+
+def _aired_episode_count(tvmaze_id: int) -> int:
+    """Return the number of aired regular episodes for a candidate show."""
+    today = time.strftime("%Y-%m-%d")
+    eps = fetch_episodes(tvmaze_id)
+    return sum(1 for e in eps if e.airdate and e.airdate <= today)
+
+
+def search_show(show_name: str, local_ep_count: int = 0) -> Optional[dict]:
+    """Return the best TVmaze show match or None.
+
+    When multiple candidates exist:
+      - 'In Development' shows are always excluded.
+      - Among remaining candidates, the one whose aired episode count is
+        closest to *local_ep_count* wins.
+    """
+    results = _request(f"{TVMAZE_BASE}/search/shows", params={"q": show_name})
+    if not results:
+        return None
+
+    # Filter out shows that are purely "In Development"
+    candidates = [
+        r["show"] for r in results
+        if r["show"].get("status", "") != "In Development"
+    ]
+
+    if not candidates:
+        return None
+
+    if len(candidates) == 1 or local_ep_count == 0:
+        return candidates[0]
+
+    # Multiple candidates — score by closeness of episode count to local library
+    # Only check the top 5 results to limit extra API calls
+    top = candidates[:5]
+    best_show = top[0]
+    best_diff = float("inf")
+
+    for show in top:
+        try:
+            remote_count = _aired_episode_count(show["id"])
+            diff = abs(remote_count - local_ep_count)
+            if diff < best_diff:
+                best_diff = diff
+                best_show = show
+        except Exception:
+            pass  # If we can't fetch, skip this candidate
+
+    return best_show
 
 
 # ---------------------------------------------------------------------------
@@ -270,8 +394,10 @@ def compare(
 # Per-show worker
 # ---------------------------------------------------------------------------
 def process_show(show_name: str, local_eps: list[LocalEpisode]) -> ShowReport:
+    local_ep_count = sum(1 for ep in local_eps if ep.episode != 0)
+
     try:
-        show = search_show(show_name)
+        show = search_show(show_name, local_ep_count=local_ep_count)
         if not show:
             return ShowReport(
                 show_name=show_name,
@@ -330,25 +456,28 @@ def _season_ep(ep) -> str:
 def format_text(reports: list[ShowReport], missing_only: bool) -> str:
     lines = []
     ok_count = sum(1 for r in reports if r.ok)
-    lines.append(f"TV Library Report — {len(reports)} shows scanned")
-    lines.append(f"{'─' * 60}")
-    lines.append(f"  ✓ Complete:  {ok_count}")
-    lines.append(f"  ✗ Issues:    {len(reports) - ok_count}")
+    issue_count = len(reports) - ok_count
+
+    lines.append(_bold(f"TV Library Report — {len(reports)} shows scanned"))
+    lines.append("─" * 60)
+    lines.append(f"  {_green('✓')} Complete:  {_green(str(ok_count))}")
+    lines.append(f"  {_red('✗')} Issues:    {_red(str(issue_count))}")
     lines.append("")
 
     for report in sorted(reports, key=lambda r: r.show_name.lower()):
         if missing_only and report.ok:
             continue
 
-        header = f"► {report.show_name}"
+        # Build header
+        title_part = _bold(_cyan(f"► {report.show_name}"))
         if report.matched_title and report.matched_title != report.show_name:
-            header += f"  [TVmaze: {report.matched_title}]"
+            title_part += _dim(f"  [TVmaze: {report.matched_title}]")
         if report.status:
-            header += f"  ({report.status})"
-        lines.append(header)
+            title_part += f"  {_dim(f'({report.status})')}"
+        lines.append(title_part)
 
         if report.lookup_error:
-            lines.append(f"    ⚠ {report.lookup_error}")
+            lines.append(f"    {_yellow('⚠')} {_yellow(report.lookup_error)}")
             lines.append("")
             continue
 
@@ -360,19 +489,50 @@ def format_text(reports: list[ShowReport], missing_only: bool) -> str:
         )
 
         if not report.missing and not report.extra:
-            lines.append("    ✓ All aired episodes present")
+            lines.append(f"    {_green('✓ All aired episodes present')}")
         else:
             if report.missing:
+                # Build per-season breakdown
                 by_season: dict[int, list[RemoteEpisode]] = {}
                 for ep in report.missing:
                     by_season.setdefault(ep.season, []).append(ep)
+
+                # Seasons that have at least one local episode
+                local_seasons_with_eps = {
+                    ep.season for ep in report.local_episodes if ep.episode != 0
+                }
+
+                # Aired remote episodes by season (for "entire season" check)
+                today = time.strftime("%Y-%m-%d")
+                aired_by_season: dict[int, int] = {}
+                for ep in report.remote_episodes:
+                    if ep.airdate and ep.airdate <= today:
+                        aired_by_season[ep.season] = aired_by_season.get(ep.season, 0) + 1
+
                 for s in sorted(by_season):
-                    eps = by_season[s]
-                    ep_nums = ", ".join(_season_ep(e) for e in sorted(eps, key=lambda x: x.episode))
-                    lines.append(f"    ✗ Missing S{s:02d}: {ep_nums}")
+                    missing_eps = by_season[s]
+                    aired_in_season = aired_by_season.get(s, 0)
+
+                    if s not in local_seasons_with_eps:
+                        # Zero local episodes for this season → entire season missing
+                        count_str = f"{len(missing_eps)} episode{'s' if len(missing_eps) != 1 else ''}"
+                        lines.append(
+                            f"    {_red('✗')} {_red(f'Season {s:02d} entirely missing')} "
+                            f"{_dim(f'({count_str})')}"
+                        )
+                    else:
+                        ep_nums = ", ".join(
+                            _season_ep(e)
+                            for e in sorted(missing_eps, key=lambda x: x.episode)
+                        )
+                        lines.append(f"    {_red('✗')} Missing {_red(f'S{s:02d}')}: {ep_nums}")
+
             if report.extra:
-                ep_list = ", ".join(_season_ep(e) for e in sorted(report.extra, key=lambda x: (x.season, x.episode)))
-                lines.append(f"    ? Extra (not in TVmaze): {ep_list}")
+                ep_list = ", ".join(
+                    _season_ep(e)
+                    for e in sorted(report.extra, key=lambda x: (x.season, x.episode))
+                )
+                lines.append(f"    {_yellow('?')} Extra (not in TVmaze): {_yellow(ep_list)}")
 
         lines.append("")
 
@@ -423,6 +583,8 @@ def format_csv(reports: list[ShowReport]) -> str:
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    global USE_COLOR
+
     parser = argparse.ArgumentParser(
         description="Compare a local TV library against TVmaze episode data."
     )
@@ -443,7 +605,15 @@ def main():
         "--outfile", default=None,
         help="Write output to this file instead of stdout"
     )
+    parser.add_argument(
+        "--no-color", action="store_true",
+        help="Disable color output even if the terminal supports it"
+    )
     args = parser.parse_args()
+
+    # Set color flag — only for text output to stdout
+    if args.output == "text" and not args.outfile and not args.no_color:
+        USE_COLOR = _detect_color_support()
 
     root = Path(args.root).expanduser().resolve()
     print(f"Scanning library: {root}", file=sys.stderr)
