@@ -10,7 +10,7 @@ No external dependencies beyond numpy.
 
 import math
 import numpy as np
-from .face_model import FaceParams
+from core.face_model import FaceParams
 
 # ---------------------------------------------------------------------------
 # Ray marching constants

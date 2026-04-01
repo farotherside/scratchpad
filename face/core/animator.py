@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .face_model import FaceParams, EMOTIONS
+from core.face_model import FaceParams, EMOTIONS
 
 
 # ---------------------------------------------------------------------------

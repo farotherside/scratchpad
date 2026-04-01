@@ -15,6 +15,10 @@ import time
 import threading
 from pathlib import Path
 
+# Ensure the face/ directory is on sys.path so absolute imports work
+# whether run as `python main.py` or `python -m face.main`
+sys.path.insert(0, str(Path(__file__).parent))
+
 # ---------------------------------------------------------------------------
 # Dependency check with friendly errors
 # ---------------------------------------------------------------------------
