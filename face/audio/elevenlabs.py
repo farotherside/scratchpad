@@ -20,8 +20,8 @@ from typing import Optional
 
 import requests
 
-from ..core.animator import Keyframe
-from ..core.face_model import CHAR_TO_VISEME
+from core.animator import Keyframe
+from core.face_model import CHAR_TO_VISEME
 
 # ---------------------------------------------------------------------------
 # Constants
