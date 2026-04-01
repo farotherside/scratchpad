@@ -55,24 +55,28 @@ VIDEO_EXTS = {
 # ---------------------------------------------------------------------------
 
 def _detect_color_support() -> bool:
-    """Return True if the terminal appears to support ANSI color."""
+    """Return True if the terminal appears to support ANSI color.
+
+    Permissive approach: if stdout is a TTY, assume color is supported
+    unless TERM is explicitly set to a known non-color value ('dumb') or
+    is completely absent.  COLORTERM and TERM_PROGRAM override everything.
+    """
     if not sys.stdout.isatty():
+        return False
+    # Explicit opt-out: NO_COLOR convention (https://no-color.org)
+    if os.environ.get("NO_COLOR") is not None:
         return False
     # Explicit opt-in signals
     colorterm = os.environ.get("COLORTERM", "").lower()
-    if colorterm in ("truecolor", "24bit", "256color", "yes"):
+    if colorterm:
+        return True
+    term_program = os.environ.get("TERM_PROGRAM", "").lower()
+    if term_program:
         return True
     term = os.environ.get("TERM", "").lower()
-    term_program = os.environ.get("TERM_PROGRAM", "").lower()
-    # Common color-capable TERM values
-    color_terms = {"xterm", "xterm-256color", "screen", "screen-256color",
-                   "tmux", "tmux-256color", "rxvt", "rxvt-unicode",
-                   "rxvt-unicode-256color", "linux", "vt100"}
-    if term in color_terms or "256color" in term or "color" in term:
-        return True
-    if term_program in ("iterm.app", "hyper", "vscode", "wezterm", "kitty", "alacritty"):
-        return True
-    return False
+    # Only known non-color values are excluded; everything else (incl. 'ansi') gets color
+    no_color_terms = {"", "dumb", "unknown"}
+    return term not in no_color_terms
 
 
 # Module-level flag — set in main() after parsing --no-color
