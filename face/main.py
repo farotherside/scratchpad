@@ -154,10 +154,13 @@ def run(args):
     lipsync_ready = threading.Event()
     lipsync_errors: list = []
 
+    # --no-audio with text: animate mouth shapes without fetching TTS
+    # --idle or no text:     pure idle animation
     idle_mode = args.idle or not args.text
+    tts_mode = not idle_mode and not args.no_audio
 
-    if not idle_mode:
-        # Kick off lipsync fetch in background
+    if tts_mode:
+        # Kick off lipsync + audio fetch in background
         api_key = args.apikey or os.environ.get("ELEVENLABS_API_KEY", "")
         lipsync_thread = threading.Thread(
             target=_load_lipsync,
@@ -167,19 +170,27 @@ def run(args):
                 api_key,
                 args.emotion,
                 animator,
-                not args.no_audio,
+                True,   # play_audio
                 lipsync_ready,
                 lipsync_errors,
             ),
             daemon=True,
         )
         lipsync_thread.start()
+    else:
+        # No API call needed — mark lipsync as immediately ready
+        lipsync_ready.set()
 
     # -----------------------------------------------------------------------
     # Render loop
     # -----------------------------------------------------------------------
     with TerminalDisplay(use_aalib=True, ramp=ramp) as td:
-        status = "Fetching TTS…" if not idle_mode else "Idle  [q to quit]"
+        if idle_mode:
+            status = "Idle  [q to quit]"
+        elif tts_mode:
+            status = "Fetching TTS…"
+        else:
+            status = f"Animating (no audio)  [{args.emotion}]  [q to quit]"
         running = True
 
         while running:
@@ -191,7 +202,7 @@ def run(args):
                 break
 
             # Update status once lipsync is ready
-            if not idle_mode and lipsync_ready.is_set():
+            if tts_mode and lipsync_ready.is_set():
                 if lipsync_errors:
                     status = f"Error: {lipsync_errors[0]}"
                 else:
@@ -209,8 +220,8 @@ def run(args):
             # Show
             td.show(buf, status_line=status)
 
-            # Check if we're done speaking (non-idle, lipsync finished, viseme settled)
-            if (not idle_mode
+            # Check if we're done speaking (TTS mode only — exit after speech ends)
+            if (tts_mode
                     and lipsync_ready.is_set()
                     and not lipsync_errors
                     and params.viseme_weight < 0.01):
