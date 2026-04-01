@@ -12,7 +12,35 @@ Scans a local TV library directory and compares it against the [TVmaze](https://
 - Flexible season/episode filename parsing (SxxExx, 1x02, etc.)
 - Parallel TVmaze lookups with polite rate limiting
 - Only checks aired episodes — skips unaired/no-airdate entries
+- Episode-count disambiguation when multiple TVmaze matches exist
+- Skips shows marked "In Development"
+- Collapses entirely-missing seasons to a single line
+- Color output when terminal supports it (`--no-color` to disable)
 - `--missing-only` flag to cut through the noise
+
+---
+
+## [face](./face) — Terminal 3D Talking Face
+
+An animated 3D face rendered entirely in ASCII art in a terminal window,
+synchronized to ElevenLabs TTS audio output.
+
+**Key features:**
+- SDF (Signed Distance Field) ray marcher — no meshes, no assets, pure numpy
+- Per-material shading: eyes, brows, lips, teeth each have distinct luminance
+- 9 viseme groups mapped from ElevenLabs per-character timestamps for lipsync
+- 5 emotion blend shapes (neutral, happy, sad, surprised, angry)
+- Idle head motion, spontaneous blinking, smooth keyframe interpolation
+- Terminal resize support via `SIGWINCH` — resolution updates live
+- aalib backend with curses fallback for ASCII rendering
+- `--no-audio` mode requires no API key
+
+```bash
+cd face && pip install -r requirements.txt
+python main.py --idle                          # idle animation
+python main.py --no-audio "hello there"        # animate, no TTS
+ELEVENLABS_API_KEY=sk_... python main.py "Hi" # full TTS + lipsync
+```
 
 ---
 

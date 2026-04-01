@@ -1,9 +1,17 @@
 """
-renderer.py — Vectorised SDF ray marcher producing a float32 luminance framebuffer.
+renderer.py — Vectorised SDF ray marcher with per-material shading.
 
-All geometry is defined as Signed Distance Functions (SDF).  The ray marcher
-steps along each pixel's ray until it hits a surface (dist < EPSILON) or
-exhausts MAX_STEPS, then applies Phong shading to compute luminance [0, 1].
+Each face primitive carries a material ID so features are distinguishable
+at terminal resolution via luminance contrast, not geometric detail alone.
+
+Materials:
+  0 = background (black)
+  1 = skin
+  2 = eye (dark brown / near black)
+  3 = eyebrow (dark)
+  4 = lip (slightly darker / pinker than skin)
+  5 = teeth/inner mouth (near white when open, else dark)
+  6 = ear
 
 No external dependencies beyond numpy.
 """
@@ -15,113 +23,117 @@ from core.face_model import FaceParams
 # ---------------------------------------------------------------------------
 # Ray marching constants
 # ---------------------------------------------------------------------------
-MAX_STEPS = 48
-MAX_DIST = 6.0
-EPSILON = 0.005
+MAX_STEPS = 64
+MAX_DIST  = 6.0
+EPSILON   = 0.003
+
+# Material base luminances (before lighting)
+MAT_BASE = {
+    0: 0.00,   # background
+    1: 0.82,   # skin
+    2: 0.08,   # eye (iris/pupil — very dark)
+    3: 0.18,   # eyebrow
+    4: 0.62,   # lips (noticeably darker than skin)
+    5: 0.90,   # inner mouth / teeth
+    6: 0.78,   # ear (slightly darker than face skin)
+}
+
+# How much lighting contributes per material (skin = full, eye = minimal)
+MAT_LIGHT = {
+    0: 0.0,
+    1: 1.0,
+    2: 0.15,
+    3: 0.5,
+    4: 0.7,
+    5: 0.4,
+    6: 0.9,
+}
 
 # ---------------------------------------------------------------------------
-# vec3 helpers (operate on (..., 3) arrays)
+# vec3 helpers
 # ---------------------------------------------------------------------------
 
-def _length(v):
+def _len2(v):
+    """Per-row length, shape (...,) from (..., 3)."""
+    return np.sqrt((v * v).sum(axis=-1))
+
+def _len2k(v):
+    """Per-row length keepdims, shape (...,1) from (...,3)."""
     return np.sqrt((v * v).sum(axis=-1, keepdims=True))
 
-def _normalize(v):
-    return v / (np.sqrt((v * v).sum(axis=-1, keepdims=True)) + 1e-12)
+def _norm(v):
+    return v / (_len2k(v) + 1e-12)
 
 def _dot(a, b):
-    return (a * b).sum(axis=-1, keepdims=True)
+    return (a * b).sum(axis=-1)
 
 
 # ---------------------------------------------------------------------------
-# SDF primitives (all operate on (..., 3) position arrays, return (..., 1))
+# SDF primitives  — return scalar distance arrays shape (N,)
 # ---------------------------------------------------------------------------
 
-def sdf_sphere(p, centre, radius):
-    return _length(p - centre) - radius
+def _sphere(p, c, r):
+    return _len2(p - c) - r
 
-def sdf_ellipsoid(p, centre, radii):
-    q = (p - centre) / radii
-    return (_length(q) - 1.0) * np.min(radii)
+def _ellipsoid(p, c, radii):
+    q = (p - c) / radii
+    return (_len2(q) - 1.0) * float(np.min(radii))
 
-def sdf_box(p, centre, half_extents):
-    q = np.abs(p - centre) - half_extents
-    return (
-        _length(np.maximum(q, 0.0)) +
-        np.minimum(np.max(q, axis=-1, keepdims=True), 0.0)
-    )
-
-def sdf_capsule(p, a, b, radius):
-    """Capsule between points a and b with given radius."""
+def _capsule(p, a, b, r):
     ab = b - a
     ap = p - a
-    t = np.clip((_dot(ap, ab)) / (_dot(ab, ab) + 1e-12), 0.0, 1.0)
-    return _length(ap - t * ab) - radius
+    t  = np.clip((ap * ab).sum(axis=-1) / ((ab * ab).sum() + 1e-12), 0.0, 1.0)
+    return _len2(ap - t[:, None] * ab) - r
 
-def sdf_torus(p, centre, big_r, small_r):
-    q = p - centre
-    xz = q[..., [0, 2]]
-    y  = q[..., [1]]
-    ring = np.sqrt((xz * xz).sum(axis=-1, keepdims=True)) - big_r
-    return np.sqrt(ring * ring + y * y) - small_r
+def _box(p, c, he):
+    q = np.abs(p - c) - he
+    return _len2(np.maximum(q, 0.0)) + np.minimum(q.max(axis=-1), 0.0)
 
-
-# ---------------------------------------------------------------------------
-# Boolean ops
-# ---------------------------------------------------------------------------
-def sdf_union(a, b):        return np.minimum(a, b)
-def sdf_subtract(a, b):     return np.maximum(a, -b)
-def sdf_intersect(a, b):    return np.maximum(a, b)
-
-def sdf_smooth_union(a, b, k=0.1):
-    # Inigo Quilez smooth minimum: mix(b, a, h) - k*h*(1-h)
-    # h→1 when close to a, h→0 when close to b
+def _smin(a, b, k=0.08):
+    """Smooth minimum (IQ), returns blended distance."""
     h = np.clip(0.5 + 0.5 * (b - a) / k, 0.0, 1.0)
     return b * (1 - h) + a * h - k * h * (1 - h)
 
 
 # ---------------------------------------------------------------------------
-# Rotation helpers
+# Rotation
 # ---------------------------------------------------------------------------
-
-def _rot_x(angle):
-    c, s = math.cos(angle), math.sin(angle)
-    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=np.float32)
 
 def _rot_y(angle):
     c, s = math.cos(angle), math.sin(angle)
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=np.float32)
 
+def _rot_x(angle):
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=np.float32)
+
 def _rot_z(angle):
     c, s = math.cos(angle), math.sin(angle)
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
 
-
-def _apply_rotation(p, yaw, pitch, roll):
-    """Rotate point cloud p by yaw/pitch/roll (head pose)."""
+def _rotate(p, yaw, pitch, roll):
     R = _rot_y(yaw) @ _rot_x(pitch) @ _rot_z(roll)
     return p @ R.T
 
 
 # ---------------------------------------------------------------------------
-# Face SDF — assembled from primitives + FaceParams blend shapes
+# Multi-material scene evaluation
+# Returns (dist, mat_id) both shape (N,)
 # ---------------------------------------------------------------------------
 
-def face_sdf(p: np.ndarray, params: FaceParams) -> np.ndarray:
-    """
-    Evaluate the complete face SDF at every point in p.
-    p has shape (..., 3).  Returns (..., 1) distance values.
-    """
-    # Rotate world-space points into head-local space (inverse head pose)
-    p_local = _apply_rotation(p, -params.total_yaw, -params.total_pitch, -params.total_roll)
+def _scene(p: np.ndarray, params: FaceParams):
+    """Evaluate all primitives, return closest distance + material ID per point."""
+    N = p.shape[0]
 
-    # Pull viseme blend values
+    # Apply inverse head pose to get head-local coordinates
+    pl = _rotate(p, -params.total_yaw, -params.total_pitch, -params.total_roll)
+
+    # Blend shape values
     vm = params.get_viseme_shape()
-    mouth_open   = vm[0]
-    mouth_wide   = vm[1]
-    lip_round    = vm[2]
+    mouth_open = vm[0]
+    mouth_wide = vm[1]
+    lip_round  = vm[2]
 
-    # Pull emotion blend values
     smile  = params.get_morph("mouth_smile")
     frown  = params.get_morph("mouth_frown")
     brow_r = params.get_morph("brow_raise")
@@ -132,211 +144,194 @@ def face_sdf(p: np.ndarray, params: FaceParams) -> np.ndarray:
     jaw_d  = params.get_morph("jaw_drop")
     blink  = params.blink
 
-    # --- HEAD (slightly squashed sphere → ellipsoid) ---
-    head = sdf_ellipsoid(p_local, np.array([0, 0, 0], dtype=np.float32),
-                         np.array([0.75, 0.88, 0.78], dtype=np.float32))
+    # Accumulate (dist, mat) — start with background
+    best_d   = np.full(N, MAX_DIST, dtype=np.float32)
+    best_mat = np.zeros(N, dtype=np.int32)
 
-    # --- JAW --- lower half of head drops slightly when mouth opens
-    jaw_offset = jaw_d * 0.06 + mouth_open * 0.08
-    jaw = sdf_ellipsoid(p_local, np.array([0, -0.35 - jaw_offset, 0.05], dtype=np.float32),
-                        np.array([0.62, 0.42, 0.60], dtype=np.float32))
-    head = sdf_smooth_union(head, jaw, 0.08)
+    def _update(d, mat_id):
+        mask = d < best_d
+        best_d[mask]   = d[mask]
+        best_mat[mask] = mat_id
 
-    # --- NOSE ---
-    nose_tip = sdf_sphere(p_local, np.array([0, -0.08, 0.72], dtype=np.float32), 0.11)
-    nose_bridge = sdf_capsule(p_local,
-                              np.array([0,  0.18, 0.65], dtype=np.float32),
-                              np.array([0, -0.02, 0.73], dtype=np.float32), 0.06)
-    nose = sdf_smooth_union(nose_tip, nose_bridge, 0.05)
-    head = sdf_smooth_union(head, nose, 0.04)
+    # ── HEAD ────────────────────────────────────────────────────────────────
+    head = _ellipsoid(pl, [0, 0, 0], np.array([0.72, 0.88, 0.76], np.float32))
 
-    # --- EYES ---
-    eye_base_y = 0.15 + brow_r * 0.02 - eye_sq * 0.02
-    eye_r_sz   = np.array([0.14, 0.09 + eye_w * 0.03 - eye_sq * 0.04, 0.10], dtype=np.float32)
-    eye_l_sz   = eye_r_sz.copy()
+    # Jaw drop
+    jaw_cy = -0.35 - jaw_d * 0.05 - mouth_open * 0.06
+    jaw    = _ellipsoid(pl, np.array([0, jaw_cy, 0.05], np.float32),
+                        np.array([0.60, 0.40, 0.58], np.float32))
+    head = _smin(head, jaw, 0.10)
 
-    eye_r = sdf_ellipsoid(p_local, np.array([ 0.28, eye_base_y, 0.62], dtype=np.float32), eye_r_sz)
-    eye_l = sdf_ellipsoid(p_local, np.array([-0.28, eye_base_y, 0.62], dtype=np.float32), eye_l_sz)
-    eyes  = sdf_union(eye_r, eye_l)
+    # Cheeks
+    ck = max(float(cheek), float(smile) * 0.25)
+    if ck > 0.01:
+        ck_r = _ellipsoid(pl, np.array([ 0.52, -0.12, 0.56], np.float32),
+                          np.array([0.20 + ck * 0.06, 0.17, 0.14], np.float32))
+        ck_l = _ellipsoid(pl, np.array([-0.52, -0.12, 0.56], np.float32),
+                          np.array([0.20 + ck * 0.06, 0.17, 0.14], np.float32))
+        head = _smin(head, np.minimum(ck_r, ck_l), 0.07)
 
-    # --- EYELIDS (blink — thin box sweeping over eye) ---
+    # Nose tip
+    nose_tip = _sphere(pl, np.array([0, -0.06, 0.74], np.float32), 0.10)
+    nose_br  = _capsule(pl,
+                        np.array([0,  0.20, 0.66], np.float32),
+                        np.array([0, -0.02, 0.74], np.float32), 0.055)
+    nose = np.minimum(nose_tip, nose_br)
+    head = _smin(head, nose, 0.04)
+
+    # Ears
+    ear_r = _ellipsoid(pl, np.array([ 0.76, 0.02, -0.05], np.float32),
+                       np.array([0.07, 0.17, 0.09], np.float32))
+    ear_l = _ellipsoid(pl, np.array([-0.76, 0.02, -0.05], np.float32),
+                       np.array([0.07, 0.17, 0.09], np.float32))
+    ears = np.minimum(ear_r, ear_l)
+
+    # Skin = head + ears
+    skin_d = np.minimum(head, ears)
+    _update(skin_d, 1)
+
+    # ── EYES ────────────────────────────────────────────────────────────────
+    eye_y  = 0.15 + brow_r * 0.02 - eye_sq * 0.02
+    eye_rx = np.array([0.14, 0.10 + eye_w * 0.03 - eye_sq * 0.04, 0.09], np.float32)
+    eye_r  = _ellipsoid(pl, np.array([ 0.26, eye_y, 0.66], np.float32), eye_rx)
+    eye_l  = _ellipsoid(pl, np.array([-0.26, eye_y, 0.66], np.float32), eye_rx)
+    eyes_d = np.minimum(eye_r, eye_l)
+    _update(eyes_d, 2)
+
+    # Eyelids (blink) — skin-coloured box sweeping down over eye
     if blink > 0.02:
-        lid_h = blink * 0.13
-        lid_r = sdf_box(p_local,
-                        np.array([ 0.28, eye_base_y + 0.06 - lid_h * 0.5, 0.63], dtype=np.float32),
-                        np.array([0.16, lid_h, 0.05], dtype=np.float32))
-        lid_l = sdf_box(p_local,
-                        np.array([-0.28, eye_base_y + 0.06 - lid_h * 0.5, 0.63], dtype=np.float32),
-                        np.array([0.16, lid_h, 0.05], dtype=np.float32))
-        lids  = sdf_union(lid_r, lid_l)
-        head  = sdf_smooth_union(head, lids, 0.03)
+        lid_h = blink * 0.14
+        lid_r = _box(pl, np.array([ 0.26, eye_y + 0.07 - lid_h * 0.5, 0.67], np.float32),
+                     np.array([0.17, lid_h, 0.05], np.float32))
+        lid_l = _box(pl, np.array([-0.26, eye_y + 0.07 - lid_h * 0.5, 0.67], np.float32),
+                     np.array([0.17, lid_h, 0.05], np.float32))
+        lids_d = np.minimum(lid_r, lid_l)
+        _update(lids_d, 1)   # skin material
 
-    # Carve eyes out of head
-    head = sdf_subtract(head, eyes)
+    # ── EYEBROWS ────────────────────────────────────────────────────────────
+    brow_y = 0.34 + brow_r * 0.07 - brow_f * 0.04
+    brow_tilt = brow_f * 0.05
+    br_r = _ellipsoid(pl, np.array([ 0.26, brow_y + brow_tilt, 0.68], np.float32),
+                      np.array([0.16, 0.038, 0.045], np.float32))
+    br_l = _ellipsoid(pl, np.array([-0.26, brow_y + brow_tilt, 0.68], np.float32),
+                      np.array([0.16, 0.038, 0.045], np.float32))
+    brows_d = np.minimum(br_r, br_l)
+    _update(brows_d, 3)
 
-    # --- EYEBROWS ---
-    brow_y = 0.33 + brow_r * 0.06 - brow_f * 0.04
-    brow_inner_tilt = brow_f * 0.04 - brow_r * 0.01
+    # ── LIPS ────────────────────────────────────────────────────────────────
+    lip_y   = -0.37 - jaw_d * 0.04
+    lip_w   = 0.20 + mouth_wide * 0.10 + smile * 0.09
+    smile_y =  smile * 0.04 - frown * 0.04
 
-    brow_r_center = np.array([ 0.27, brow_y + brow_inner_tilt, 0.67], dtype=np.float32)
-    brow_l_center = np.array([-0.27, brow_y + brow_inner_tilt, 0.67], dtype=np.float32)
-    brow_r_sdf = sdf_ellipsoid(p_local, brow_r_center, np.array([0.17, 0.035, 0.05], dtype=np.float32))
-    brow_l_sdf = sdf_ellipsoid(p_local, brow_l_center, np.array([0.17, 0.035, 0.05], dtype=np.float32))
-    brows = sdf_union(brow_r_sdf, brow_l_sdf)
-    head  = sdf_smooth_union(head, brows, 0.03)
+    up_lip = _ellipsoid(pl,
+                        np.array([0, lip_y + 0.062 + mouth_open * 0.03 + smile_y, 0.69], np.float32),
+                        np.array([lip_w, 0.042 + lip_round * 0.01, 0.055], np.float32))
+    lo_lip = _ellipsoid(pl,
+                        np.array([0, lip_y - 0.058 - mouth_open * 0.05 + smile_y, 0.69], np.float32),
+                        np.array([lip_w * 0.92, 0.050 + lip_round * 0.01, 0.055], np.float32))
+    lips_d = np.minimum(up_lip, lo_lip)
+    _update(lips_d, 4)
 
-    # --- MOUTH ---
-    # Lip centre descends with jaw_drop; widens with mouth_wide + smile
-    lip_y     = -0.38 - jaw_d * 0.05
-    lip_w_x   = 0.22 + mouth_wide * 0.12 + smile * 0.10
-    smile_y   = smile * 0.04 - frown * 0.04
+    # Inner mouth / teeth (only when open enough to matter)
+    if mouth_open > 0.08:
+        inner = _ellipsoid(pl,
+                           np.array([0, lip_y + smile_y, 0.66], np.float32),
+                           np.array([lip_w * 0.80, mouth_open * 0.11, 0.07], np.float32))
+        _update(inner, 5)
 
-    # Upper lip
-    up_lip = sdf_ellipsoid(p_local,
-                           np.array([0, lip_y + 0.055 + mouth_open * 0.04 + smile_y, 0.67], dtype=np.float32),
-                           np.array([lip_w_x, 0.04 + lip_round * 0.02, 0.06], dtype=np.float32))
-    # Lower lip
-    lo_lip = sdf_ellipsoid(p_local,
-                           np.array([0, lip_y - 0.055 - mouth_open * 0.06 + smile_y, 0.67], dtype=np.float32),
-                           np.array([lip_w_x * 0.95, 0.05 + lip_round * 0.02, 0.06], dtype=np.float32))
-    # Mouth cavity (subtract from head when open)
-    if mouth_open > 0.05:
-        cavity = sdf_ellipsoid(p_local,
-                               np.array([0, lip_y + smile_y, 0.66], dtype=np.float32),
-                               np.array([lip_w_x * 0.85, mouth_open * 0.12, 0.08], dtype=np.float32))
-        head = sdf_subtract(head, cavity)
-
-    lips = sdf_union(up_lip, lo_lip)
-    head = sdf_smooth_union(head, lips, 0.03)
-
-    # --- CHEEKS --- (puff slightly when smiling)
-    if cheek > 0.01 or smile > 0.1:
-        ck = max(cheek, smile * 0.3)
-        ck_r = sdf_ellipsoid(p_local,
-                             np.array([ 0.55, -0.10, 0.58], dtype=np.float32),
-                             np.array([0.18 + ck * 0.08, 0.16, 0.14], dtype=np.float32))
-        ck_l = sdf_ellipsoid(p_local,
-                             np.array([-0.55, -0.10, 0.58], dtype=np.float32),
-                             np.array([0.18 + ck * 0.08, 0.16, 0.14], dtype=np.float32))
-        head = sdf_smooth_union(head, sdf_union(ck_r, ck_l), 0.06)
-
-    # --- EARS ---
-    ear_r = sdf_ellipsoid(p_local, np.array([ 0.78, 0.02, -0.05], dtype=np.float32),
-                          np.array([0.07, 0.18, 0.10], dtype=np.float32))
-    ear_l = sdf_ellipsoid(p_local, np.array([-0.78, 0.02, -0.05], dtype=np.float32),
-                          np.array([0.07, 0.18, 0.10], dtype=np.float32))
-    head = sdf_smooth_union(head, sdf_union(ear_r, ear_l), 0.04)
-
-    return head
+    return best_d, best_mat
 
 
 # ---------------------------------------------------------------------------
-# Normal estimation via central differences
+# Normal estimation (central differences, per-material-agnostic distance)
 # ---------------------------------------------------------------------------
-_NORM_EPS = 0.004
-_NORM_OFFS = np.array([
-    [ _NORM_EPS,  0,  0],
-    [-_NORM_EPS,  0,  0],
-    [0,  _NORM_EPS,  0],
-    [0, -_NORM_EPS,  0],
-    [0,  0,  _NORM_EPS],
-    [0,  0, -_NORM_EPS],
-], dtype=np.float32)  # (6, 3)
+_NEPS = 0.003
+_NOFF = np.array([
+    [ _NEPS, 0, 0], [-_NEPS, 0, 0],
+    [0,  _NEPS, 0], [0, -_NEPS, 0],
+    [0, 0,  _NEPS], [0, 0, -_NEPS],
+], dtype=np.float32)
 
 
-def estimate_normal(hit_pts: np.ndarray, params: FaceParams) -> np.ndarray:
-    """hit_pts: (N, 3)  →  returns (N, 3) unit normals."""
-    N = hit_pts.shape[0]
-    # Broadcast: (N, 6, 3)
-    p6 = hit_pts[:, None, :] + _NORM_OFFS[None, :, :]   # (N, 6, 3)
-    p6_flat = p6.reshape(-1, 3)
-    d = face_sdf(p6_flat, params).reshape(N, 6)
-    nx = d[:, 0] - d[:, 1]
-    ny = d[:, 2] - d[:, 3]
-    nz = d[:, 4] - d[:, 5]
-    n = np.stack([nx, ny, nz], axis=-1)
-    # per-row normalisation
+def _normals(pts: np.ndarray, params: FaceParams) -> np.ndarray:
+    """pts: (N,3) → normals: (N,3)"""
+    N = pts.shape[0]
+    p6 = pts[:, None, :] + _NOFF[None, :, :]      # (N, 6, 3)
+    d6, _ = _scene(p6.reshape(-1, 3), params)
+    d6 = d6.reshape(N, 6)
+    n = np.stack([d6[:, 0] - d6[:, 1],
+                  d6[:, 2] - d6[:, 3],
+                  d6[:, 4] - d6[:, 5]], axis=-1)
     return n / (np.sqrt((n * n).sum(axis=-1, keepdims=True)) + 1e-12)
 
 
 # ---------------------------------------------------------------------------
-# Ray marcher
+# Main render function
 # ---------------------------------------------------------------------------
 
 def render(width: int, height: int, params: FaceParams) -> np.ndarray:
     """
-    Render the face into a float32 luminance framebuffer of shape (height, width).
-    Values are in [0, 1].
+    Returns float32 luminance framebuffer (height, width) in [0, 1].
     """
-    # Pixel grid in NDC space [-1, 1] x [-1, 1], corrected for aspect ratio
     aspect = width / height
-    xs = np.linspace(-aspect, aspect, width, dtype=np.float32)
+    xs = np.linspace(-aspect, aspect, width,  dtype=np.float32)
     ys = np.linspace( 1.0,   -1.0,   height, dtype=np.float32)
-    xv, yv = np.meshgrid(xs, ys)               # (H, W)
+    xv, yv = np.meshgrid(xs, ys)
 
-    # Camera: sits on +Z axis looking toward origin
-    cam_pos = np.array([0.0, 0.0, 2.8], dtype=np.float32)
-    focal_len = 1.8
+    cam = np.array([0.0, 0.0, 2.8], dtype=np.float32)
+    focal = 1.8
 
-    # Ray directions (perspective) — normalise per-pixel (keepdims on last axis)
-    rd = np.stack([xv, yv, np.full_like(xv, -focal_len)], axis=-1)   # (H, W, 3)
-    rd_len = np.sqrt((rd * rd).sum(axis=-1, keepdims=True)) + 1e-12
-    rd = rd / rd_len
+    # Ray directions — normalised per pixel
+    rd = np.stack([xv, yv, np.full_like(xv, -focal)], axis=-1)  # (H, W, 3)
+    rd = rd / (_len2k(rd) + 1e-12)
 
-    # Flatten to (N, 3)
     N = height * width
-    ray_o = np.broadcast_to(cam_pos, (N, 3)).copy()
+    ray_o = np.broadcast_to(cam, (N, 3)).copy()
     ray_d = rd.reshape(N, 3)
 
-    # Ray march — operate on ALL rays each step using full-array masking
-    t      = np.zeros(N, dtype=np.float32)
-    hit    = np.zeros(N, dtype=bool)
-    active = np.ones(N,  dtype=bool)
+    t        = np.zeros(N,  dtype=np.float32)
+    hit      = np.zeros(N,  dtype=bool)
+    hit_mat  = np.zeros(N,  dtype=np.int32)
+    active   = np.ones(N,   dtype=bool)
 
     for _ in range(MAX_STEPS):
         if not active.any():
             break
-        # Evaluate SDF at all active ray positions
-        active_idx = np.where(active)[0]
-        pts = ray_o[active_idx] + ray_d[active_idx] * t[active_idx, None]
-        d = face_sdf(pts, params).reshape(-1)
-        # Advance active rays
-        t[active_idx] += d
-        # Mark hits
-        newly_hit = active_idx[d < EPSILON]
-        hit[newly_hit] = True
-        active[newly_hit] = False
-        # Deactivate rays that escaped
-        escaped = active_idx[t[active_idx] > MAX_DIST]
-        active[escaped] = False
+        idx = np.where(active)[0]
+        pts = ray_o[idx] + ray_d[idx] * t[idx, None]
+        d, mat = _scene(pts, params)
+        t[idx] += d
+        newly_hit = idx[d < EPSILON]
+        hit[newly_hit]     = True
+        hit_mat[newly_hit] = mat[d < EPSILON]
+        active[newly_hit]  = False
+        active[idx[t[idx] > MAX_DIST]] = False
 
-    # Shade hit points
+    # Shade
     luminance = np.zeros(N, dtype=np.float32)
 
     if hit.any():
-        hit_pts = ray_o[hit] + ray_d[hit] * t[hit, None]
-        normals = estimate_normal(hit_pts, params)
+        pts_hit = ray_o[hit] + ray_d[hit] * t[hit, None]
+        nrm     = _normals(pts_hit, params)
+        mat_ids = hit_mat[hit]
 
-        # Phong lighting
-        light1 = _normalize_vec(np.array([ 1.5,  2.0,  3.0], dtype=np.float32))
-        light2 = _normalize_vec(np.array([-1.0,  0.5,  2.0], dtype=np.float32))
-        # Normalise per-row (each ray direction is a separate vector)
-        vd = -ray_d[hit]
-        view_dir = vd / (np.linalg.norm(vd, axis=-1, keepdims=True) + 1e-12)
+        L1  = _norm(np.array([ 1.2,  1.8,  2.5], np.float32)[None])
+        L2  = _norm(np.array([-0.8,  0.4,  1.5], np.float32)[None])
+        vd  = _norm(-ray_d[hit])
 
-        # Diffuse
-        diff1 = np.clip((normals * light1).sum(axis=-1), 0, 1) * 0.7
-        diff2 = np.clip((normals * light2).sum(axis=-1), 0, 1) * 0.2
-        # Ambient
-        amb = 0.12
-        # Specular
-        refl1 = normals * 2.0 * np.clip((normals * light1).sum(axis=-1, keepdims=True), 0, 1) - light1
-        spec1 = np.clip((refl1 * view_dir).sum(axis=-1), 0, 1) ** 16 * 0.25
+        diff1 = np.clip(_dot(nrm, L1), 0, 1) * 0.65
+        diff2 = np.clip(_dot(nrm, L2), 0, 1) * 0.20
+        amb   = 0.15
 
-        luminance[hit] = np.clip(amb + diff1 + diff2 + spec1, 0.0, 1.0)
+        refl  = nrm * 2.0 * np.clip(_dot(nrm, L1), 0, 1)[:, None] - L1
+        spec  = np.clip(_dot(refl, vd), 0, 1) ** 20 * 0.18
+
+        light = np.clip(amb + diff1 + diff2 + spec, 0.0, 1.0)
+
+        # Per-material luminance
+        base  = np.array([MAT_BASE[m] for m in mat_ids], dtype=np.float32)
+        lscale = np.array([MAT_LIGHT[m] for m in mat_ids], dtype=np.float32)
+
+        luminance[hit] = np.clip(base + (light - 0.5) * lscale * 0.6, 0.0, 1.0)
 
     return luminance.reshape(height, width)
-
-
-def _normalize_vec(v: np.ndarray) -> np.ndarray:
-    return v / (np.linalg.norm(v) + 1e-12)
