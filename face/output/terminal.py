@@ -71,23 +71,25 @@ def _on_sigwinch(sig, frame):
 # ---------------------------------------------------------------------------
 
 class AalibRenderer:
-    """Renders using the aalib library."""
+    """Renders using the aalib library (requires both aalib and Pillow)."""
 
     def __init__(self):
         self._aa = _try_import_aalib()
         if self._aa is None:
             raise ImportError("aalib not available")
+        try:
+            from PIL import Image  # noqa: F401 — validate at init time
+            self._Image = Image
+        except ImportError:
+            raise ImportError("Pillow (PIL) not available — needed by aalib backend")
 
     def render(self, framebuf: np.ndarray, cols: int, rows: int) -> str:
         """Convert float32 (H, W) framebuf → ASCII string via aalib."""
         aa = self._aa
-        # aalib wants a (H, W) uint8 bitmap
+        Image = self._Image
         u8 = (np.clip(framebuf, 0, 1) * 255).astype(np.uint8)
-
         screen = aa.AsciiScreen(width=cols, height=rows)
-        # Resize framebuf to match aalib virtual image size
         vw, vh = screen.virtual_size
-        from PIL import Image  # aalib path uses PIL for resize
         img = Image.fromarray(u8, mode="L").resize((vw, vh), Image.LANCZOS)
         pixels = np.array(img).astype(np.float32) / 255.0
         screen.put_image((0, 0), pixels)
@@ -158,7 +160,10 @@ class TerminalDisplay:
         self._stdscr = curses.initscr()
         curses.noecho()
         curses.cbreak()
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)   # hide cursor (not supported on all terminals)
+        except curses.error:
+            pass
         self._stdscr.nodelay(True)   # non-blocking getch
         self._stdscr.keypad(True)
 
