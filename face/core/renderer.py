@@ -74,8 +74,10 @@ def sdf_subtract(a, b):     return np.maximum(a, -b)
 def sdf_intersect(a, b):    return np.maximum(a, b)
 
 def sdf_smooth_union(a, b, k=0.1):
+    # Inigo Quilez smooth minimum: mix(b, a, h) - k*h*(1-h)
+    # h→1 when close to a, h→0 when close to b
     h = np.clip(0.5 + 0.5 * (b - a) / k, 0.0, 1.0)
-    return a * (1 - h) + b * h - k * h * (1 - h)
+    return b * (1 - h) + a * h - k * h * (1 - h)
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +255,8 @@ def estimate_normal(hit_pts: np.ndarray, params: FaceParams) -> np.ndarray:
     ny = d[:, 2] - d[:, 3]
     nz = d[:, 4] - d[:, 5]
     n = np.stack([nx, ny, nz], axis=-1)
-    return n / (np.linalg.norm(n, axis=-1, keepdims=True) + 1e-12)
+    # per-row normalisation
+    return n / (np.sqrt((n * n).sum(axis=-1, keepdims=True)) + 1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -275,16 +278,17 @@ def render(width: int, height: int, params: FaceParams) -> np.ndarray:
     cam_pos = np.array([0.0, 0.0, 2.8], dtype=np.float32)
     focal_len = 1.8
 
-    # Ray directions (perspective)
+    # Ray directions (perspective) — normalise per-pixel (keepdims on last axis)
     rd = np.stack([xv, yv, np.full_like(xv, -focal_len)], axis=-1)   # (H, W, 3)
-    rd = rd / (np.linalg.norm(rd, axis=-1, keepdims=True) + 1e-12)
+    rd_len = np.sqrt((rd * rd).sum(axis=-1, keepdims=True)) + 1e-12
+    rd = rd / rd_len
 
     # Flatten to (N, 3)
     N = height * width
     ray_o = np.broadcast_to(cam_pos, (N, 3)).copy()
     ray_d = rd.reshape(N, 3)
 
-    # Ray march
+    # Ray march — operate on ALL rays each step using full-array masking
     t      = np.zeros(N, dtype=np.float32)
     hit    = np.zeros(N, dtype=bool)
     active = np.ones(N,  dtype=bool)
@@ -292,14 +296,19 @@ def render(width: int, height: int, params: FaceParams) -> np.ndarray:
     for _ in range(MAX_STEPS):
         if not active.any():
             break
-        pts = ray_o[active] + ray_d[active] * t[active, None]
+        # Evaluate SDF at all active ray positions
+        active_idx = np.where(active)[0]
+        pts = ray_o[active_idx] + ray_d[active_idx] * t[active_idx, None]
         d = face_sdf(pts, params).reshape(-1)
-        t[active] += d
-        new_hit = active.copy()
-        new_hit[active] = d < EPSILON
-        hit |= new_hit
-        active[new_hit] = False
-        active[t > MAX_DIST] = False
+        # Advance active rays
+        t[active_idx] += d
+        # Mark hits
+        newly_hit = active_idx[d < EPSILON]
+        hit[newly_hit] = True
+        active[newly_hit] = False
+        # Deactivate rays that escaped
+        escaped = active_idx[t[active_idx] > MAX_DIST]
+        active[escaped] = False
 
     # Shade hit points
     luminance = np.zeros(N, dtype=np.float32)
@@ -311,7 +320,9 @@ def render(width: int, height: int, params: FaceParams) -> np.ndarray:
         # Phong lighting
         light1 = _normalize_vec(np.array([ 1.5,  2.0,  3.0], dtype=np.float32))
         light2 = _normalize_vec(np.array([-1.0,  0.5,  2.0], dtype=np.float32))
-        view_dir = _normalize_vec(-ray_d[hit])
+        # Normalise per-row (each ray direction is a separate vector)
+        vd = -ray_d[hit]
+        view_dir = vd / (np.linalg.norm(vd, axis=-1, keepdims=True) + 1e-12)
 
         # Diffuse
         diff1 = np.clip((normals * light1).sum(axis=-1), 0, 1) * 0.7
