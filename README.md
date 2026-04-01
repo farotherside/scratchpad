@@ -62,3 +62,25 @@ transformations across the codebase as the corpus evolves.
 Designed for unattended operation via cron. Each run produces a structured
 JSON manifest in `lexeng/run_logs/` and emits one git commit per action.
 Transform weights and action frequency are tunable via `lexeng/config.json`.
+
+---
+
+## [voice-agent](./voice-agent) — AI Phone Call Agent
+
+A real-time AI voice agent that handles live phone calls. Twilio streams
+audio into the server, Deepgram transcribes speech in real time, Claude
+generates a conversational reply, and ElevenLabs synthesises the response
+back into audio — all within a single live phone call.
+
+**Key features:**
+- Full duplex: speech-in → text → LLM → TTS → audio-out in one pipeline
+- Streaming TTS via ElevenLabs → ffmpeg → μ-law encoding for Twilio
+- Deepgram nova-3 STT with utterance-end detection
+- Outbound call trigger via `/call` HTTP endpoint
+- Auto-sends full call transcript to Signal on hang-up
+- Supervisor and `@reboot` cron scripts for persistent operation
+
+```bash
+cd voice-agent && npm install
+bash start.sh   # starts ngrok + server, sets Twilio webhook
+```
