@@ -91,10 +91,12 @@ class AalibRenderer:
         screen = aa.AsciiScreen(width=cols, height=rows)
         vw, vh = screen.virtual_size
         img = Image.fromarray(u8, mode="L").resize((vw, vh), Image.LANCZOS)
-        pixels = np.array(img).astype(np.float32) / 255.0
-        screen.put_image((0, 0), pixels)
-        screen.render()
-        return screen.get_str()
+        screen.put_image((0, 0), img)
+        result = screen.render()
+        # render() returns bytes on some aalib versions
+        if isinstance(result, bytes):
+            result = result.decode("ascii", errors="replace")
+        return result
 
 
 class FallbackRenderer:
@@ -146,11 +148,15 @@ class TerminalDisplay:
         self._renderer = None
 
     def __enter__(self):
-        # Attempt aalib first
+        # Attempt aalib first — validate it actually works with a small test render
         if self._use_aalib:
             try:
-                self._renderer = AalibRenderer()
-            except (ImportError, Exception):
+                candidate = AalibRenderer()
+                # Smoke-test: render a tiny 4x2 buffer to catch runtime failures
+                test_buf = np.zeros((2, 4), dtype=np.float32)
+                candidate.render(test_buf, 4, 2)
+                self._renderer = candidate
+            except Exception:
                 self._use_aalib = False
 
         if not self._use_aalib:
