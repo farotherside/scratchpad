@@ -215,11 +215,13 @@ def _load_lipsync(
 
 
 # ---------------------------------------------------------------------------
-# Intro: static → face-emerges-from-pool effect
+# Intro: black → static fade-in → face emerges forward through static
 # ---------------------------------------------------------------------------
-_STATIC_HOLD   = 2.0   # seconds of pure static before face appears
-_EMERGE_DUR    = 1.5   # seconds for the face to rise and clear
-_INTRO_TOTAL   = _STATIC_HOLD + _EMERGE_DUR
+_FADE_IN_DUR   = 1.5   # seconds: black fades to static
+_STATIC_HOLD   = 2.0   # seconds: static holds (the flat "water surface")
+_EMERGE_DUR    = 2.0   # seconds: face pushes forward through the static plane
+_INTRO_TOTAL   = _FADE_IN_DUR + _STATIC_HOLD + _EMERGE_DUR
+_STATIC_LUM    = 0.55  # peak luminance of background static
 
 
 def _smoothstep(t: float) -> float:
@@ -231,70 +233,82 @@ def _noise(h: int, w: int) -> "np.ndarray":
     return np.random.rand(h, w).astype(np.float32)
 
 
-def _apply_intro(face_buf: "np.ndarray", t: float, h: int, w: int) -> "np.ndarray":
+def _apply_intro(
+    face_lum: "np.ndarray",
+    face_depth: "np.ndarray",
+    t: float,
+    h: int,
+    w: int,
+) -> "np.ndarray":
     """
-    Composite the face framebuffer with the static-pool emergence effect.
+    Composite the face with a static-pool emergence effect.
 
-    t   — seconds since app start
-    Returns a float32 (h, w) luminance buffer ready for TerminalDisplay.show().
+    face_lum   — (h, w) Phong-shaded luminance
+    face_depth — (h, w) world-Z per pixel (-inf = background, higher = closer)
+    t          — seconds since app start
 
     Phases
     ------
-    0 … STATIC_HOLD          : full-screen live TV static (face not shown)
-    STATIC_HOLD … INTRO_TOTAL: face rises from below with head tilted up;
-                                face pixels are luminance-weighted noise that
-                                fades to clean shading; pool static stays below
-                                the face's leading edge; ripple at the surface.
+    0 → FADE_IN              : screen fades from black to live static
+    FADE_IN → FADE_IN+HOLD   : static holds — the "water surface"
+    then → INTRO_TOTAL       : Z-clip sweeps front→back through the face;
+                                nose appears first, then cheeks, then ears.
+                                Just-emerged pixels are luminance-weighted noise;
+                                well-emerged pixels fade to clean shading.
     """
-    if t < _STATIC_HOLD:
-        # Pure static — face is not rendered yet
-        return _noise(h, w) * 0.85
+    # ---- Phase 1: black → static ----
+    if t < _FADE_IN_DUR:
+        fade = _smoothstep(t / _FADE_IN_DUR)
+        return _noise(h, w) * _STATIC_LUM * fade
 
-    ease = _smoothstep((t - _STATIC_HOLD) / _EMERGE_DUR)
+    # ---- Phase 2: static holds ----
+    t2 = t - _FADE_IN_DUR
+    if t2 < _STATIC_HOLD:
+        return _noise(h, w) * _STATIC_LUM
 
-    # ---- Screen-space Y shift: face starts one full screen below, rises up ----
-    y_px = int((1.0 - ease) * h * 1.15)   # 0 = final position, h*1.15 = off-screen
-    shifted = np.zeros((h, w), np.float32)
-    if y_px < h:
-        rows = h - y_px
-        shifted[y_px:, :] = face_buf[:rows, :]
+    # ---- Phase 3: face emerges through the static plane ----
+    ease = _smoothstep((t2 - _STATIC_HOLD) / _EMERGE_DUR)
 
-    # ---- Surface line: first row that contains face pixels ----
-    row_max = shifted.max(axis=1)           # (h,)
-    face_rows = np.where(row_max > 0.02)[0]
-    surface_y = int(face_rows[0]) if len(face_rows) else h
+    has_face = np.isfinite(face_depth) & (face_depth > -100)
 
-    bg   = _noise(h, w) * 0.85
-    bg2  = _noise(h, w) * 1.0              # second noise layer for face texture
+    if has_face.any():
+        z_max = float(face_depth[has_face].max())   # nose tip (closest)
+        z_min = float(face_depth[has_face].min())   # ears / sides (farthest)
+    else:
+        z_max, z_min = 1.0, -1.0
 
-    result = np.zeros((h, w), np.float32)
+    z_range = max(z_max - z_min, 0.01)
+    margin  = z_range * 0.15
 
-    # ---- Pool: dense static below surface ----
-    if surface_y < h:
-        result[surface_y:, :] = bg[surface_y:, :] * 0.92
+    # Clip plane sweeps from in-front-of-nose → behind-ears
+    clip_z = z_max + margin - ease * (z_range + 2 * margin)
 
-    # ---- Ripple: brighter noise at the surface edge (±1 row) ----
-    rip0 = max(0, surface_y - 1)
-    rip1 = min(h, surface_y + 2)
-    if rip0 < rip1:
-        ripple = _noise(h, w)
-        result[rip0:rip1, :] = np.maximum(result[rip0:rip1, :],
-                                           ripple[rip0:rip1, :] * 0.95)
+    # Base static — the flat "water surface"
+    static = _noise(h, w) * _STATIC_LUM
+    result = static.copy()
 
-    # ---- Face: structured noise fades to clean Phong shading ----
-    face_mask = shifted > 0.02
-    if face_mask.any():
-        face_noisy = bg2 * shifted            # noise weighted by face luminance
-        face_clean = shifted
-        blended = face_noisy * (1.0 - ease) + face_clean * ease
-        result = np.where(face_mask, blended, result)
+    # Pixels that have broken through the surface (Z ≥ clip)
+    emerged = has_face & (face_depth >= clip_z)
 
-    # ---- Background above surface: static that fades out as face clears ----
-    rows_idx = np.arange(h, dtype=np.int32)[:, None]   # (h, 1)  broadcasts over w
-    above_surface = rows_idx < surface_y
-    bg_fade = max(0.0, 1.0 - ease * 2.2)               # fades faster than face
-    bg_above = above_surface & ~face_mask
-    result = np.where(bg_above, bg * bg_fade, result)
+    if emerged.any():
+        # How far past the clip each pixel is  (0 = just surfaced, 1 = fully clear)
+        depth_past = face_depth[emerged] - clip_z
+        solidify   = np.clip(depth_past / (z_range * 0.35), 0.0, 1.0)
+
+        # Just-emerged: luminance-weighted noise (3-D shape visible in static)
+        # Well-emerged: clean Phong shading
+        face_noise = _noise(h, w)
+        noisy  = face_noise[emerged] * face_lum[emerged] * 1.6
+        clean  = face_lum[emerged]
+        result[emerged] = noisy * (1.0 - solidify) + clean * solidify
+
+        # Bright fringe at the clip boundary — surface tension / splash
+        near_clip = has_face & (face_depth >= clip_z) & \
+                    (face_depth < clip_z + z_range * 0.06)
+        if near_clip.any():
+            fringe = _noise(h, w)
+            result[near_clip] = np.maximum(result[near_clip],
+                                           fringe[near_clip] * 0.92)
 
     return np.clip(result, 0.0, 1.0)
 
@@ -394,19 +408,22 @@ def run(args):
             t_intro = now - app_start
             intro_active = t_intro < _INTRO_TOTAL
 
-            if intro_active and t_intro < _STATIC_HOLD:
-                # Pure static phase — skip the (slow) mesh render entirely
-                buf = np.zeros((rh, rw), np.float32)
+            if intro_active and t_intro < (_FADE_IN_DUR + _STATIC_HOLD):
+                # Black → static phases — skip the (slow) mesh render entirely
+                face_lum   = np.zeros((rh, rw), np.float32)
+                face_depth = np.full((rh, rw), -np.inf, np.float32)
             else:
-                # Apply head-tilt for the 3-D "rising from below" look
+                # Apply head-tilt for the 3-D "pushing through" look
                 if intro_active:
                     emerge_ease = _smoothstep(
-                        (t_intro - _STATIC_HOLD) / _EMERGE_DUR)
+                        (t_intro - _FADE_IN_DUR - _STATIC_HOLD) / _EMERGE_DUR)
                     params.head_pitch += 0.45 * (1.0 - emerge_ease)
-                buf = render(rw, rh, params)
+                face_lum, face_depth = render(rw, rh, params, return_depth=True)
 
             if intro_active:
-                buf = _apply_intro(buf, t_intro, rh, rw)
+                buf = _apply_intro(face_lum, face_depth, t_intro, rh, rw)
+            else:
+                buf = face_lum
 
             # Show — status on last line, debug overlay on second-to-last
             debug = td.debug_line

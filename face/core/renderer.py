@@ -218,15 +218,20 @@ def _rasterise(
     hit = np.isfinite(zbuf)
     if hit.any():
         luminance[hit] = _shade(nbuf[hit])
-    return luminance
+    return luminance, zbuf
 
 
 # ---------------------------------------------------------------------------
 # Public entry point — same signature as the old SDF renderer
 # ---------------------------------------------------------------------------
 
-def render(width: int, height: int, params: FaceParams) -> np.ndarray:
-    """Returns float32 luminance framebuffer (height, width) in [0, 1]."""
+def render(width: int, height: int, params: FaceParams,
+           return_depth: bool = False):
+    """
+    Returns float32 luminance framebuffer (height, width) in [0, 1].
+    If *return_depth* is True, returns (luminance, zbuf) where zbuf holds
+    per-pixel world-Z values (-inf for background, higher = closer to camera).
+    """
     mesh = _get_mesh()
     verts, faces, vert_normals = mesh.get_deformed(params)
 
@@ -237,4 +242,7 @@ def render(width: int, height: int, params: FaceParams) -> np.ndarray:
 
     px, py, pz = _project(verts_r, width, height)
 
-    return _rasterise(px, py, pz, normals_r, faces, width, height)
+    luminance, zbuf = _rasterise(px, py, pz, normals_r, faces, width, height)
+    if return_depth:
+        return luminance, zbuf
+    return luminance
