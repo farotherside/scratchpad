@@ -111,70 +111,118 @@ def _detect_colors() -> str:
 # Static / noise effect  (inspired by BB demo's scene1.c)
 #
 # BB writes directly into aalib's textbuffer/attrbuffer using HEXA chars
-# (random hex digits or spaces in a 3-wide pattern) with per-row random
-# horizontal shifts and a randomval parameter on the render pipeline.
+# with per-row random horizontal shifts and dim/normal/bold attributes.
 #
-# We replicate the same idea at the character level: after downscaling the
-# framebuffer to (rows, cols), we identify background pixels (luminance below
-# a threshold) and overwrite them with noise characters using the same
-# 3-wide hex pattern + random per-row shifts.
+# We generate a (rows, cols) structured noise layer: each background cell
+# gets a random char from a weighted pool and a random curses attribute
+# (A_DIM / A_NORMAL / A_BOLD), giving the flickery TV-static look.
 # ---------------------------------------------------------------------------
 
-# Characters used for noise — hex-like, visually dense
-_HEXA = "0123456789ABCDEF"
-_STATIC_BG_CHARS = " " * 6 + "." * 3 + "`" * 2 + _HEXA   # weighted toward sparse
+# Weighted character pool: spaces dominate for sparsity, hex for density
+_HEXA       = "0123456789ABCDEF"
+# Mixed pool: lots of spaces + punctuation + hex, weighted toward sparse
+_NOISE_POOL = (" " * 12 + "." * 4 + ":" * 2 + "`" * 2 + "'" * 2
+               + _HEXA + _HEXA[:8])   # hex doubled for more density
+
+# Curses attribute levels for static cells — populated after curses init
+_STATIC_ATTRS = None   # set to list[int] on first use
 
 
-def _make_static_row(cols: int, shift: int, intensity: float,
-                     rng: np.random.Generator) -> list[str]:
-    """Generate one row of BB-style hex static.
+def _get_static_attrs():
+    """Return curses attribute constants (lazy, after curses.initscr)."""
+    global _STATIC_ATTRS
+    if _STATIC_ATTRS is None:
+        _STATIC_ATTRS = [
+            curses.A_DIM,
+            curses.A_NORMAL,
+            curses.A_NORMAL,   # weight normal higher
+            curses.A_BOLD,
+        ]
+    return _STATIC_ATTRS
 
-    intensity: 0.0 = silent, 1.0 = full noise
-    shift:     horizontal offset for the 3-wide pattern (0-2)
+
+class StaticLayer:
+    """Per-frame noise layer: (rows, cols) arrays of chars + curses attrs.
+
+    Call .generate(rows, cols, small, intensity) each frame to produce
+    updated noise, then use .chars and .attrs to write per-cell to curses.
     """
-    chars = []
-    for x in range(cols):
-        if rng.random() > intensity:
-            chars.append(" ")   # sparse — leave space
-            continue
-        # BB pattern: every 3rd column (offset by shift) gets a hex char
-        if (x - shift) % 3 == 0:
-            chars.append(_HEXA[rng.integers(0, len(_HEXA))])
-        else:
-            chars.append(" ")
-    return chars
+
+    def __init__(self):
+        self._rng = np.random.default_rng()
+        self.chars: list[list[str]] = []   # [row][col] -> char or None
+        self.attrs: list[list[int]] = []   # [row][col] -> curses attr
+
+    def generate(self, rows: int, cols: int, small: np.ndarray,
+                 intensity: float, bg_threshold: float = 0.20):
+        """Regenerate noise for all background pixels.
+
+        small     : float32 (rows, cols) downscaled luminance
+        intensity : 0.0=off, 1.0=full
+        """
+        rng = self._rng
+        pool = _NOISE_POOL
+        pool_len = len(pool)
+        attr_list = _get_static_attrs()
+        n_attrs = len(attr_list)
+
+        row_chars = []
+        row_attrs = []
+
+        for r in range(min(rows, small.shape[0])):
+            row_lum = small[r]
+            bg_mask = row_lum < bg_threshold
+
+            # Per-row random horizontal shift (BB's randshift effect)
+            shift = int(rng.integers(0, 3)) if rng.random() < intensity * 0.7 else 0
+
+            crow = []
+            arow = []
+            for x in range(min(cols, small.shape[1])):
+                if not bg_mask[x] or rng.random() > intensity:
+                    crow.append(None)   # None = leave face char alone
+                    arow.append(curses.A_NORMAL)
+                    continue
+                # BB 3-wide pattern with random shift
+                if (x - shift) % 3 == 0:
+                    ch = pool[int(rng.integers(0, pool_len))]
+                else:
+                    # off-pattern: mostly spaces, occasional light char
+                    ch = pool[int(rng.integers(0, min(16, pool_len)))]
+                attr = attr_list[int(rng.integers(0, n_attrs))]
+                crow.append(ch)
+                arow.append(attr)
+            row_chars.append(crow)
+            row_attrs.append(arow)
+
+        self.chars = row_chars
+        self.attrs = row_attrs
 
 
-def _apply_static(lines: list[str], small: np.ndarray,
-                  intensity: float, rng: np.random.Generator,
-                  bg_threshold: float = 0.20) -> list[str]:
-    """Overwrite background positions in rendered ASCII lines with noise.
-
-    lines      : list of rendered ASCII strings, one per row
-    small      : float32 (rows, cols) luminance buffer already downscaled
-    intensity  : 0..1 static intensity
-    bg_threshold: pixels below this luminance are considered background
-    """
+def _apply_static_to_string(lines: list[str], small: np.ndarray,
+                             intensity: float, rng: np.random.Generator,
+                             bg_threshold: float = 0.20) -> list[str]:
+    """String-only static overlay for non-curses paths (no attr support)."""
     if intensity <= 0.0:
         return lines
-
+    pool = _NOISE_POOL
+    pool_len = len(pool)
     rows, cols = small.shape
     out = []
     for r, line in enumerate(lines[:rows]):
-        row_lum = small[r]                          # (cols,) float32
-        bg_mask = row_lum < bg_threshold            # True where background
+        row_lum = small[r]
+        bg_mask = row_lum < bg_threshold
         if not bg_mask.any():
             out.append(line)
             continue
-
-        # Random per-row horizontal shift (BB's randshift)
-        shift = rng.integers(0, 3) if rng.random() < intensity else 0
-        noise = _make_static_row(cols, shift, intensity, rng)
-
+        shift = int(rng.integers(0, 3)) if rng.random() < intensity * 0.7 else 0
         chars = list(line.ljust(cols)[:cols])
         for x in range(min(cols, len(bg_mask))):
-            if bg_mask[x]:
-                chars[x] = noise[x]
+            if bg_mask[x] and rng.random() <= intensity:
+                if (x - shift) % 3 == 0:
+                    chars[x] = pool[int(rng.integers(0, pool_len))]
+                else:
+                    chars[x] = pool[int(rng.integers(0, min(16, pool_len)))]
         out.append("".join(chars))
     return out
 
@@ -197,8 +245,7 @@ class AalibRenderer:
             raise ImportError("Pillow (PIL) not available — needed by aalib backend")
         self._rng = np.random.default_rng()
 
-    def render(self, framebuf: np.ndarray, cols: int, rows: int,
-               static: float = 0.0) -> str:
+    def render(self, framebuf: np.ndarray, cols: int, rows: int) -> str:
         """Convert float32 (H, W) framebuf → ASCII string via aalib."""
         aa = self._aa
         Image = self._Image
@@ -212,17 +259,6 @@ class AalibRenderer:
         if isinstance(result, bytes):
             result = result.decode("ascii", errors="replace")
 
-        # Apply BB-style static overlay using the original framebuf as mask
-        if static > 0.0:
-            lines = result.split("\n")
-            # Downscale framebuf to (rows, cols) for background mask
-            h, w = framebuf.shape
-            row_idx = np.linspace(0, h - 1, rows).astype(int)
-            col_idx = np.linspace(0, w - 1, cols).astype(int)
-            small = framebuf[np.ix_(row_idx, col_idx)]
-            lines = _apply_static(lines, small, static, self._rng)
-            result = "\n".join(lines)
-
         return result
 
 
@@ -233,12 +269,8 @@ class FallbackRenderer:
         self._ramp = ramp
         self._rng = np.random.default_rng()
 
-    def render(self, framebuf: np.ndarray, cols: int, rows: int,
-               static: float = 0.0) -> str:
-        """Downscale framebuf to (rows, cols) and map luminance → chars.
-
-        static: 0.0 = no noise, 1.0 = full BB-style hex static in background
-        """
+    def render(self, framebuf: np.ndarray, cols: int, rows: int) -> str:
+        """Downscale framebuf to (rows, cols) and map luminance → chars."""
         h, w = framebuf.shape
 
         # Bilinear downscale via numpy slicing (fast approximation)
@@ -254,10 +286,6 @@ class FallbackRenderer:
         for row in small:
             chars = "".join(ramp[int(v * ramp_len)] for v in row)
             lines.append(chars)
-
-        # Apply BB-style background static if requested
-        if static > 0.0:
-            lines = _apply_static(lines, small, static, self._rng)
 
         return "\n".join(lines)
 
@@ -285,6 +313,7 @@ class TerminalDisplay:
         self._stdscr = None
         self._renderer = None
         self.static = static          # 0.0 = off, 1.0 = full BB static
+        self._static_layer = StaticLayer()
         # FPS tracking
         self._frame_times: deque = deque(maxlen=30)
         # Debug info (populated in __enter__)
@@ -404,23 +433,47 @@ class TerminalDisplay:
         overlay_rows = (1 if status_line else 0) + (1 if debug_line else 0)
         render_rows = max(1, rows - overlay_rows)
 
-        # Both renderers now accept static= kwarg
-        art = self._renderer.render(framebuf, cols, render_rows, static=self.static)
+        art = self._renderer.render(framebuf, cols, render_rows)
+
+        # Build downscaled luminance mask for static overlay
+        _small = None
+        if self.static > 0.0:
+            h, w = framebuf.shape
+            row_idx = np.linspace(0, h - 1, render_rows).astype(int)
+            col_idx = np.linspace(0, w - 1, cols).astype(int)
+            _small = framebuf[np.ix_(row_idx, col_idx)]
         lines = art.split("\n")
 
         if self._stdscr:
             scr = self._stdscr
             scr.erase()
-            # Curses throws if we write to the very last cell (cols-1, last row)
-            # so we cap all writes at cols-1 characters wide.
             safe_w = max(1, cols - 1)
+
+            # Generate static layer for this frame
+            if self.static > 0.0 and _small is not None:
+                self._static_layer.generate(render_rows, safe_w, _small, self.static)
+                sl_chars = self._static_layer.chars
+                sl_attrs = self._static_layer.attrs
+            else:
+                sl_chars = None
+                sl_attrs = None
+
             for i, line in enumerate(lines[:render_rows]):
+                # Write face art first
                 try:
-                    # Use addnstr to write exactly safe_w chars — avoids
-                    # the curses right-edge crash without silently truncating
                     scr.addnstr(i, 0, line.ljust(safe_w)[:safe_w], safe_w)
                 except curses.error:
                     pass
+                # Then overwrite background cells with noise + random attrs
+                if sl_chars and i < len(sl_chars):
+                    crow = sl_chars[i]
+                    arow = sl_attrs[i]
+                    for x, (ch, attr) in enumerate(zip(crow, arow)):
+                        if ch is not None and x < safe_w:
+                            try:
+                                scr.addstr(i, x, ch, attr)
+                            except curses.error:
+                                pass
             # Debug line sits above status line
             if debug_line and status_line:
                 try:
@@ -439,9 +492,14 @@ class TerminalDisplay:
                     pass
             scr.refresh()
         else:
-            # Fallback: just print (no curses)
+            # Fallback: just print (no curses) — use string static path
+            if self.static > 0.0 and _small is not None:
+                lines = _apply_static_to_string(
+                    lines, _small, self.static,
+                    self._static_layer._rng
+                )
             sys.stdout.write("\033[H")  # move to top-left
-            sys.stdout.write(art)
+            sys.stdout.write("\n".join(lines))
             if debug_line:
                 sys.stdout.write(f"\n{debug_line}")
             if status_line:
