@@ -78,6 +78,10 @@ def parse_args():
         help="Run idle animation loop without TTS"
     )
     parser.add_argument(
+        "--demo", action="store_true",
+        help='Animate the face saying the built-in demo phrase (no API key needed)'
+    )
+    parser.add_argument(
         "--ramp", choices=["dense", "simple"], default="dense",
         help="ASCII brightness ramp style (default: dense)"
     )
@@ -90,6 +94,38 @@ def parse_args():
         help="Override render framebuffer height (default: terminal height * 4)"
     )
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Demo lipsync — drives mouth shapes from text chars, no API key needed
+# ---------------------------------------------------------------------------
+DEMO_TEXT = "Hello, this is the face animating to show it saying something!"
+_SECS_PER_CHAR = 0.072   # ~14 chars/sec ≈ natural speech pace
+
+
+def _make_demo_keyframes(text: str, start_offset: float = 0.15) -> list[Keyframe]:
+    """Generate lipsync keyframes from raw text using CHAR_TO_VISEME mapping."""
+    from core.face_model import CHAR_TO_VISEME
+    now = time.monotonic() + start_offset
+    keyframes = []
+    t = now
+    for ch in text.lower():
+        viseme = CHAR_TO_VISEME.get(ch, 0)
+        # Peak viseme weight at mid-character, ramp in/out
+        keyframes.append(Keyframe(
+            t=t,
+            viseme_index=viseme,
+            viseme_weight=0.0 if viseme == 0 else 0.9,
+        ))
+        keyframes.append(Keyframe(
+            t=t + _SECS_PER_CHAR * 0.8,
+            viseme_index=viseme,
+            viseme_weight=0.0,
+        ))
+        t += _SECS_PER_CHAR
+    # Closing rest keyframe
+    keyframes.append(Keyframe(t=t + 0.1, viseme_index=0, viseme_weight=0.0))
+    return keyframes
 
 
 # ---------------------------------------------------------------------------
@@ -156,10 +192,17 @@ def run(args):
 
     # --no-audio with text: animate mouth shapes without fetching TTS
     # --idle or no text:     pure idle animation
-    idle_mode = args.idle or not args.text
-    tts_mode = not idle_mode and not args.no_audio
+    # --demo:               built-in phrase, char-driven lipsync, no API needed
+    demo_mode = args.demo
+    idle_mode = args.idle or (not args.text and not demo_mode)
+    tts_mode = not idle_mode and not demo_mode and not args.no_audio
 
-    if tts_mode:
+    if demo_mode:
+        # Load char-driven keyframes immediately — no API needed
+        demo_text = args.text if args.text else DEMO_TEXT
+        animator.load_lipsync(_make_demo_keyframes(demo_text))
+        lipsync_ready.set()
+    elif tts_mode:
         # Kick off lipsync + audio fetch in background
         api_key = args.apikey or os.environ.get("ELEVENLABS_API_KEY", "")
         lipsync_thread = threading.Thread(
@@ -187,6 +230,8 @@ def run(args):
     with TerminalDisplay(use_aalib=True, ramp=ramp) as td:
         if idle_mode:
             status = "Idle  [q to quit]"
+        elif demo_mode:
+            status = f"Demo  [{args.emotion}]  [q to quit]"
         elif tts_mode:
             status = "Fetching TTS…"
         else:
@@ -221,8 +266,8 @@ def run(args):
             debug = td.debug_line
             td.show(buf, status_line=status, debug_line=debug)
 
-            # Check if we're done speaking (TTS mode only — exit after speech ends)
-            if (tts_mode
+            # Check if we're done speaking (TTS + demo mode — exit after speech ends)
+            if ((tts_mode or demo_mode)
                     and lipsync_ready.is_set()
                     and not lipsync_errors
                     and params.viseme_weight < 0.01):
