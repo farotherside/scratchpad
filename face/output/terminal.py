@@ -13,6 +13,7 @@ import os
 import signal
 import sys
 import time
+from collections import deque
 from typing import Optional
 import numpy as np
 
@@ -64,6 +65,45 @@ _resize_pending = False
 def _on_sigwinch(sig, frame):
     global _resize_pending
     _resize_pending = True
+
+
+# ---------------------------------------------------------------------------
+# Debug info helpers
+# ---------------------------------------------------------------------------
+
+def _detect_terminal() -> str:
+    """Best-effort terminal emulator identification."""
+    for var in ("TERM_PROGRAM", "TERMINAL_EMULATOR", "TERM"):
+        val = os.environ.get(var, "")
+        if val:
+            return val
+    return "unknown"
+
+
+def _detect_colors() -> str:
+    """Detect color capability from environment."""
+    colorterm = os.environ.get("COLORTERM", "").lower()
+    if colorterm in ("truecolor", "24bit"):
+        return "24-bit (truecolor)"
+    if colorterm == "256color":
+        return "256-color"
+    term = os.environ.get("TERM", "")
+    if "256color" in term:
+        return "256-color"
+    if "color" in term:
+        return "8-color"
+    # Ask curses at runtime if available
+    try:
+        n = curses.tigetnum("colors")
+        if n >= 16777216:
+            return "24-bit (truecolor)"
+        if n >= 256:
+            return "256-color"
+        if n >= 8:
+            return f"{n}-color"
+    except Exception:
+        pass
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +186,12 @@ class TerminalDisplay:
         self._ramp = ramp
         self._stdscr = None
         self._renderer = None
+        # FPS tracking
+        self._frame_times: deque = deque(maxlen=30)
+        # Debug info (populated in __enter__)
+        self.debug_backend: str = "unknown"
+        self.debug_terminal: str = _detect_terminal()
+        self.debug_colors: str = "unknown"  # populated after curses init
 
     def __enter__(self):
         # Attempt aalib first — validate it actually works with a small test render
@@ -156,11 +202,13 @@ class TerminalDisplay:
                 test_buf = np.zeros((2, 4), dtype=np.float32)
                 candidate.render(test_buf, 4, 2)
                 self._renderer = candidate
+                self.debug_backend = "aalib"
             except Exception:
                 self._use_aalib = False
 
         if not self._use_aalib:
             self._renderer = FallbackRenderer(self._ramp)
+            self.debug_backend = f"fallback (ramp/{len(self._ramp)}ch)"
 
         # Set up curses
         self._stdscr = curses.initscr()
@@ -177,6 +225,10 @@ class TerminalDisplay:
         signal.signal(signal.SIGWINCH, _on_sigwinch)
 
         self._cols, self._rows = get_terminal_size()
+
+        # Color detection — best done after curses init
+        self.debug_colors = _detect_colors()
+
         return self
 
     def __exit__(self, *_):
@@ -215,14 +267,40 @@ class TerminalDisplay:
     def rows(self) -> int:
         return self._rows
 
-    def show(self, framebuf: np.ndarray, status_line: str = ""):
-        """Render framebuf to the terminal window."""
+    @property
+    def fps(self) -> float:
+        """Current smoothed FPS over the last 30 frames."""
+        ft = self._frame_times
+        if len(ft) < 2:
+            return 0.0
+        span = ft[-1] - ft[0]
+        return (len(ft) - 1) / span if span > 0 else 0.0
+
+    @property
+    def debug_line(self) -> str:
+        """One-line debug summary: backend | terminal | colors | fps."""
+        return (
+            f"renderer={self.debug_backend}  "
+            f"term={self.debug_terminal}  "
+            f"colors={self.debug_colors}  "
+            f"fps={self.fps:.1f}"
+        )
+
+    def show(self, framebuf: np.ndarray, status_line: str = "",
+             debug_line: str = ""):
+        """Render framebuf to the terminal window.
+
+        status_line  — displayed on the last row
+        debug_line   — displayed on the second-to-last row (renderer/fps info)
+        """
+        self._frame_times.append(time.monotonic())
         self.check_resize()
         rows = self._rows
         cols = self._cols
 
-        # Leave one row for status line if provided
-        render_rows = rows - 1 if status_line else rows
+        # Reserve rows for overlay lines
+        overlay_rows = (1 if status_line else 0) + (1 if debug_line else 0)
+        render_rows = max(1, rows - overlay_rows)
 
         art = self._renderer.render(framebuf, cols, render_rows)
         lines = art.split("\n")
@@ -235,6 +313,17 @@ class TerminalDisplay:
                     scr.addstr(i, 0, line[:cols])
                 except curses.error:
                     pass
+            # Debug line sits above status line
+            if debug_line and status_line:
+                try:
+                    scr.addstr(rows - 2, 0, debug_line[:cols])
+                except curses.error:
+                    pass
+            elif debug_line:
+                try:
+                    scr.addstr(rows - 1, 0, debug_line[:cols])
+                except curses.error:
+                    pass
             if status_line:
                 try:
                     scr.addstr(rows - 1, 0, status_line[:cols])
@@ -245,6 +334,8 @@ class TerminalDisplay:
             # Fallback: just print (no curses)
             sys.stdout.write("\033[H")  # move to top-left
             sys.stdout.write(art)
+            if debug_line:
+                sys.stdout.write(f"\n{debug_line}")
             if status_line:
                 sys.stdout.write(f"\n{status_line}")
             sys.stdout.flush()
