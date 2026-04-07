@@ -217,8 +217,9 @@ def run(args):
             rw, rh = get_render_size(cols, rows)
             buf = render(rw, rh, params)
 
-            # Show
-            td.show(buf, status_line=status)
+            # Show — status on last line, debug overlay on second-to-last
+            debug = td.debug_line
+            td.show(buf, status_line=status, debug_line=debug)
 
             # Check if we're done speaking (TTS mode only — exit after speech ends)
             if (tts_mode
