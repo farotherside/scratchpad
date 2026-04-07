@@ -195,6 +195,7 @@ class TerminalDisplay:
 
     def __enter__(self):
         # Attempt aalib first — validate it actually works with a small test render
+        self._aalib_error: str = ""
         if self._use_aalib:
             try:
                 candidate = AalibRenderer()
@@ -203,12 +204,14 @@ class TerminalDisplay:
                 candidate.render(test_buf, 4, 2)
                 self._renderer = candidate
                 self.debug_backend = "aalib"
-            except Exception:
+            except Exception as e:
+                self._aalib_error = f"{type(e).__name__}: {e}"
                 self._use_aalib = False
 
         if not self._use_aalib:
             self._renderer = FallbackRenderer(self._ramp)
-            self.debug_backend = f"fallback (ramp/{len(self._ramp)}ch)"
+            err = f" [{self._aalib_error}]" if self._aalib_error else ""
+            self.debug_backend = f"fallback (ramp/{len(self._ramp)}ch){err}"
 
         # Set up curses
         self._stdscr = curses.initscr()
