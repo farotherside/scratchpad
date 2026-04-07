@@ -215,6 +215,91 @@ def _load_lipsync(
 
 
 # ---------------------------------------------------------------------------
+# Intro: static → face-emerges-from-pool effect
+# ---------------------------------------------------------------------------
+_STATIC_HOLD   = 2.0   # seconds of pure static before face appears
+_EMERGE_DUR    = 1.5   # seconds for the face to rise and clear
+_INTRO_TOTAL   = _STATIC_HOLD + _EMERGE_DUR
+
+
+def _smoothstep(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _noise(h: int, w: int) -> "np.ndarray":
+    return np.random.rand(h, w).astype(np.float32)
+
+
+def _apply_intro(face_buf: "np.ndarray", t: float, h: int, w: int) -> "np.ndarray":
+    """
+    Composite the face framebuffer with the static-pool emergence effect.
+
+    t   — seconds since app start
+    Returns a float32 (h, w) luminance buffer ready for TerminalDisplay.show().
+
+    Phases
+    ------
+    0 … STATIC_HOLD          : full-screen live TV static (face not shown)
+    STATIC_HOLD … INTRO_TOTAL: face rises from below with head tilted up;
+                                face pixels are luminance-weighted noise that
+                                fades to clean shading; pool static stays below
+                                the face's leading edge; ripple at the surface.
+    """
+    if t < _STATIC_HOLD:
+        # Pure static — face is not rendered yet
+        return _noise(h, w) * 0.85
+
+    ease = _smoothstep((t - _STATIC_HOLD) / _EMERGE_DUR)
+
+    # ---- Screen-space Y shift: face starts one full screen below, rises up ----
+    y_px = int((1.0 - ease) * h * 1.15)   # 0 = final position, h*1.15 = off-screen
+    shifted = np.zeros((h, w), np.float32)
+    if y_px < h:
+        rows = h - y_px
+        shifted[y_px:, :] = face_buf[:rows, :]
+
+    # ---- Surface line: first row that contains face pixels ----
+    row_max = shifted.max(axis=1)           # (h,)
+    face_rows = np.where(row_max > 0.02)[0]
+    surface_y = int(face_rows[0]) if len(face_rows) else h
+
+    bg   = _noise(h, w) * 0.85
+    bg2  = _noise(h, w) * 1.0              # second noise layer for face texture
+
+    result = np.zeros((h, w), np.float32)
+
+    # ---- Pool: dense static below surface ----
+    if surface_y < h:
+        result[surface_y:, :] = bg[surface_y:, :] * 0.92
+
+    # ---- Ripple: brighter noise at the surface edge (±1 row) ----
+    rip0 = max(0, surface_y - 1)
+    rip1 = min(h, surface_y + 2)
+    if rip0 < rip1:
+        ripple = _noise(h, w)
+        result[rip0:rip1, :] = np.maximum(result[rip0:rip1, :],
+                                           ripple[rip0:rip1, :] * 0.95)
+
+    # ---- Face: structured noise fades to clean Phong shading ----
+    face_mask = shifted > 0.02
+    if face_mask.any():
+        face_noisy = bg2 * shifted            # noise weighted by face luminance
+        face_clean = shifted
+        blended = face_noisy * (1.0 - ease) + face_clean * ease
+        result = np.where(face_mask, blended, result)
+
+    # ---- Background above surface: static that fades out as face clears ----
+    rows_idx = np.arange(h, dtype=np.int32)[:, None]   # (h, 1)  broadcasts over w
+    above_surface = rows_idx < surface_y
+    bg_fade = max(0.0, 1.0 - ease * 2.2)               # fades faster than face
+    bg_above = above_surface & ~face_mask
+    result = np.where(bg_above, bg * bg_fade, result)
+
+    return np.clip(result, 0.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
 # Main render loop
 # ---------------------------------------------------------------------------
 def run(args):
@@ -281,6 +366,7 @@ def run(args):
         else:
             status = f"Animating (no audio)  [{args.emotion}]  [q to quit]"
         running = True
+        app_start = time.monotonic()
 
         while running:
             loop_start = time.monotonic()
@@ -304,7 +390,23 @@ def run(args):
             # Render framebuffer
             cols, rows = td.cols, td.rows
             rw, rh = get_render_size(cols, rows)
-            buf = render(rw, rh, params)
+
+            t_intro = now - app_start
+            intro_active = t_intro < _INTRO_TOTAL
+
+            if intro_active and t_intro < _STATIC_HOLD:
+                # Pure static phase — skip the (slow) mesh render entirely
+                buf = np.zeros((rh, rw), np.float32)
+            else:
+                # Apply head-tilt for the 3-D "rising from below" look
+                if intro_active:
+                    emerge_ease = _smoothstep(
+                        (t_intro - _STATIC_HOLD) / _EMERGE_DUR)
+                    params.head_pitch += 0.45 * (1.0 - emerge_ease)
+                buf = render(rw, rh, params)
+
+            if intro_active:
+                buf = _apply_intro(buf, t_intro, rh, rw)
 
             # Show — status on last line, debug overlay on second-to-last
             debug = td.debug_line
