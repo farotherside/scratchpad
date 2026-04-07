@@ -147,7 +147,7 @@ def _make_static_row(cols: int, shift: int, intensity: float,
 
 def _apply_static(lines: list[str], small: np.ndarray,
                   intensity: float, rng: np.random.Generator,
-                  bg_threshold: float = 0.08) -> list[str]:
+                  bg_threshold: float = 0.20) -> list[str]:
     """Overwrite background positions in rendered ASCII lines with noise.
 
     lines      : list of rendered ASCII strings, one per row
@@ -400,25 +400,30 @@ class TerminalDisplay:
         if self._stdscr:
             scr = self._stdscr
             scr.erase()
+            # Curses throws if we write to the very last cell (cols-1, last row)
+            # so we cap all writes at cols-1 characters wide.
+            safe_w = max(1, cols - 1)
             for i, line in enumerate(lines[:render_rows]):
                 try:
-                    scr.addstr(i, 0, line[:cols])
+                    # Use addnstr to write exactly safe_w chars — avoids
+                    # the curses right-edge crash without silently truncating
+                    scr.addnstr(i, 0, line.ljust(safe_w)[:safe_w], safe_w)
                 except curses.error:
                     pass
             # Debug line sits above status line
             if debug_line and status_line:
                 try:
-                    scr.addstr(rows - 2, 0, debug_line[:cols])
+                    scr.addstr(rows - 2, 0, debug_line[:safe_w])
                 except curses.error:
                     pass
             elif debug_line:
                 try:
-                    scr.addstr(rows - 1, 0, debug_line[:cols])
+                    scr.addstr(rows - 1, 0, debug_line[:safe_w])
                 except curses.error:
                     pass
             if status_line:
                 try:
-                    scr.addstr(rows - 1, 0, status_line[:cols])
+                    scr.addstr(rows - 1, 0, status_line[:safe_w])
                 except curses.error:
                     pass
             scr.refresh()

@@ -86,8 +86,8 @@ def parse_args():
         help="ASCII brightness ramp style (default: dense)"
     )
     parser.add_argument(
-        "--static", type=float, default=0.6, metavar="INTENSITY",
-        help="Background static intensity 0.0=off 1.0=full (default: 0.6)"
+        "--static", type=float, default=0.85, metavar="INTENSITY",
+        help="Background static intensity 0.0=off 1.0=full (default: 0.85)"
     )
     parser.add_argument(
         "--render-width", type=int, default=None,
