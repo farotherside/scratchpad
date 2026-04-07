@@ -100,31 +100,52 @@ def parse_args():
 # Demo lipsync — drives mouth shapes from text chars, no API key needed
 # ---------------------------------------------------------------------------
 DEMO_TEXT = "Hello, this is the face animating to show it saying something!"
-_SECS_PER_CHAR = 0.072   # ~14 chars/sec ≈ natural speech pace
+_SECS_PER_CHAR = 0.10    # per character advance
+_VISEME_HOLD   = 0.22    # how long each viseme stays open before ramping out
 
 
 def _make_demo_keyframes(text: str, start_offset: float = 0.15) -> list[Keyframe]:
-    """Generate lipsync keyframes from raw text using CHAR_TO_VISEME mapping."""
+    """Generate lipsync keyframes from raw text using CHAR_TO_VISEME mapping.
+
+    Skips punctuation and spaces (viseme 0) so the mouth only moves on
+    actual phoneme characters, giving a much more natural rhythm.
+    """
     from core.face_model import CHAR_TO_VISEME
     now = time.monotonic() + start_offset
     keyframes = []
     t = now
+    prev_viseme = 0
     for ch in text.lower():
         viseme = CHAR_TO_VISEME.get(ch, 0)
-        # Peak viseme weight at mid-character, ramp in/out
+        if viseme == 0:
+            # Silence / punctuation — close mouth briefly then continue
+            if prev_viseme != 0:
+                keyframes.append(Keyframe(t=t, viseme_index=0, viseme_weight=0.0))
+            t += _SECS_PER_CHAR * 0.8   # shorter pause for spaces
+            prev_viseme = 0
+            continue
+        # Ramp up
         keyframes.append(Keyframe(
             t=t,
             viseme_index=viseme,
-            viseme_weight=0.0 if viseme == 0 else 0.9,
+            viseme_weight=0.85,
         ))
+        # Hold
         keyframes.append(Keyframe(
-            t=t + _SECS_PER_CHAR * 0.8,
+            t=t + _VISEME_HOLD,
+            viseme_index=viseme,
+            viseme_weight=0.85,
+        ))
+        # Ramp down
+        keyframes.append(Keyframe(
+            t=t + _VISEME_HOLD + 0.06,
             viseme_index=viseme,
             viseme_weight=0.0,
         ))
         t += _SECS_PER_CHAR
+        prev_viseme = viseme
     # Closing rest keyframe
-    keyframes.append(Keyframe(t=t + 0.1, viseme_index=0, viseme_weight=0.0))
+    keyframes.append(Keyframe(t=t + 0.2, viseme_index=0, viseme_weight=0.0))
     return keyframes
 
 
