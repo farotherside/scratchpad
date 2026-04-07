@@ -1,337 +1,240 @@
 """
-renderer.py — Vectorised SDF ray marcher with per-material shading.
+renderer.py — Mesh rasteriser for the teen_head OBJ model.
 
-Each face primitive carries a material ID so features are distinguishable
-at terminal resolution via luminance contrast, not geometric detail alone.
-
-Materials:
-  0 = background (black)
-  1 = skin
-  2 = eye (dark brown / near black)
-  3 = eyebrow (dark)
-  4 = lip (slightly darker / pinker than skin)
-  5 = teeth/inner mouth (near white when open, else dark)
-  6 = ear
+Replaces the SDF ray marcher.  Pipeline per frame:
+  1. Apply blend-shape deformation  (numpy, vectorised)
+  2. Apply head-pose rotation        (numpy, vectorised)
+  3. Perspective-project vertices    (numpy, vectorised)
+  4. Backface-cull + bbox filter     (numpy, vectorised)
+  5. Per-triangle rasterise + z-buf  (Python loop over visible tris only)
+  6. Phong shade hit pixels           (numpy, vectorised)
 
 No external dependencies beyond numpy.
 """
 
+from __future__ import annotations
 import math
 import numpy as np
 from core.face_model import FaceParams
+from core.mesh import MeshFace
 
 # ---------------------------------------------------------------------------
-# Ray marching constants
+# Lazy singleton mesh (loaded once on first render call)
 # ---------------------------------------------------------------------------
-MAX_STEPS = 64
-MAX_DIST  = 6.0
-EPSILON   = 0.003
+_MESH: MeshFace | None = None
 
-# Material base luminances (before lighting)
-MAT_BASE = {
-    0: 0.00,   # background
-    1: 0.82,   # skin
-    2: 0.08,   # eye (iris/pupil — very dark)
-    3: 0.18,   # eyebrow
-    4: 0.62,   # lips (noticeably darker than skin)
-    5: 0.90,   # inner mouth / teeth
-    6: 0.78,   # ear (slightly darker than face skin)
-}
 
-# How much lighting contributes per material (skin = full, eye = minimal)
-MAT_LIGHT = {
-    0: 0.0,
-    1: 1.0,
-    2: 0.15,
-    3: 0.5,
-    4: 0.7,
-    5: 0.4,
-    6: 0.9,
-}
-
-# ---------------------------------------------------------------------------
-# vec3 helpers
-# ---------------------------------------------------------------------------
-
-def _len2(v):
-    """Per-row length, shape (...,) from (..., 3)."""
-    return np.sqrt((v * v).sum(axis=-1))
-
-def _len2k(v):
-    """Per-row length keepdims, shape (...,1) from (...,3)."""
-    return np.sqrt((v * v).sum(axis=-1, keepdims=True))
-
-def _norm(v):
-    return v / (_len2k(v) + 1e-12)
-
-def _dot(a, b):
-    return (a * b).sum(axis=-1)
+def _get_mesh() -> MeshFace:
+    global _MESH
+    if _MESH is None:
+        _MESH = MeshFace()
+    return _MESH
 
 
 # ---------------------------------------------------------------------------
-# SDF primitives  — return scalar distance arrays shape (N,)
+# Camera / projection constants
 # ---------------------------------------------------------------------------
+CAM_Z = 2.0
+FOCAL = 1.8
 
-def _sphere(p, c, r):
-    return _len2(p - c) - r
-
-def _ellipsoid(p, c, radii):
-    q = (p - c) / radii
-    return (_len2(q) - 1.0) * float(np.min(radii))
-
-def _capsule(p, a, b, r):
-    ab = b - a
-    ap = p - a
-    t  = np.clip((ap * ab).sum(axis=-1) / ((ab * ab).sum() + 1e-12), 0.0, 1.0)
-    return _len2(ap - t[:, None] * ab) - r
-
-def _box(p, c, he):
-    q = np.abs(p - c) - he
-    return _len2(np.maximum(q, 0.0)) + np.minimum(q.max(axis=-1), 0.0)
-
-def _smin(a, b, k=0.08):
-    """Smooth minimum (IQ), returns blended distance."""
-    h = np.clip(0.5 + 0.5 * (b - a) / k, 0.0, 1.0)
-    return b * (1 - h) + a * h - k * h * (1 - h)
-
+# Terminal characters are ~2× taller than wide in pixels.
+# Compensate so the face fills the screen proportionally.
+CHAR_ASPECT = 0.5    # char_pixel_width / char_pixel_height
 
 # ---------------------------------------------------------------------------
-# Rotation
+# Rotation helpers (same convention as original renderer)
 # ---------------------------------------------------------------------------
 
-def _rot_y(angle):
-    c, s = math.cos(angle), math.sin(angle)
-    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=np.float32)
+def _rot_y(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], np.float32)
 
-def _rot_x(angle):
-    c, s = math.cos(angle), math.sin(angle)
-    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=np.float32)
 
-def _rot_z(angle):
-    c, s = math.cos(angle), math.sin(angle)
-    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
+def _rot_x(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], np.float32)
 
-def _rotate(p, yaw, pitch, roll):
-    R = _rot_y(yaw) @ _rot_x(pitch) @ _rot_z(roll)
-    return p @ R.T
+
+def _rot_z(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], np.float32)
 
 
 # ---------------------------------------------------------------------------
-# Multi-material scene evaluation
-# Returns (dist, mat_id) both shape (N,)
+# Lighting
 # ---------------------------------------------------------------------------
+def _unit(v: np.ndarray) -> np.ndarray:
+    return v / (np.linalg.norm(v) + 1e-12)
 
-def _scene(p: np.ndarray, params: FaceParams):
-    """Evaluate all primitives, return closest distance + material ID per point."""
-    N = p.shape[0]
 
-    # Apply inverse head pose to get head-local coordinates
-    pl = _rotate(p, -params.total_yaw, -params.total_pitch, -params.total_roll)
+_L1 = _unit(np.array([ 1.2,  1.8,  2.5], np.float32))   # key
+_L2 = _unit(np.array([-0.8,  0.4,  1.5], np.float32))   # fill
+_VIEW = _unit(np.array([0.0,  0.0,  1.0], np.float32))   # camera direction
 
-    # Blend shape values
-    vm = params.get_viseme_shape()
-    mouth_open = vm[0]
-    mouth_wide = vm[1]
-    lip_round  = vm[2]
 
-    smile  = params.get_morph("mouth_smile")
-    frown  = params.get_morph("mouth_frown")
-    brow_r = params.get_morph("brow_raise")
-    brow_f = params.get_morph("brow_furrow")
-    cheek  = params.get_morph("cheek_raise")
-    eye_w  = params.get_morph("eye_wide")
-    eye_sq = params.get_morph("eye_squint")
-    jaw_d  = params.get_morph("jaw_drop")
-    blink  = params.blink
-
-    # Accumulate (dist, mat) — start with background
-    best_d   = np.full(N, MAX_DIST, dtype=np.float32)
-    best_mat = np.zeros(N, dtype=np.int32)
-
-    def _update(d, mat_id):
-        mask = d < best_d
-        best_d[mask]   = d[mask]
-        best_mat[mask] = mat_id
-
-    # ── HEAD ────────────────────────────────────────────────────────────────
-    head = _ellipsoid(pl, [0, 0, 0], np.array([0.72, 0.88, 0.76], np.float32))
-
-    # Jaw drop
-    jaw_cy = -0.35 - jaw_d * 0.05 - mouth_open * 0.06
-    jaw    = _ellipsoid(pl, np.array([0, jaw_cy, 0.05], np.float32),
-                        np.array([0.60, 0.40, 0.58], np.float32))
-    head = _smin(head, jaw, 0.10)
-
-    # Cheeks
-    ck = max(float(cheek), float(smile) * 0.25)
-    if ck > 0.01:
-        ck_r = _ellipsoid(pl, np.array([ 0.52, -0.12, 0.56], np.float32),
-                          np.array([0.20 + ck * 0.06, 0.17, 0.14], np.float32))
-        ck_l = _ellipsoid(pl, np.array([-0.52, -0.12, 0.56], np.float32),
-                          np.array([0.20 + ck * 0.06, 0.17, 0.14], np.float32))
-        head = _smin(head, np.minimum(ck_r, ck_l), 0.07)
-
-    # Nose tip
-    nose_tip = _sphere(pl, np.array([0, -0.06, 0.74], np.float32), 0.10)
-    nose_br  = _capsule(pl,
-                        np.array([0,  0.20, 0.66], np.float32),
-                        np.array([0, -0.02, 0.74], np.float32), 0.055)
-    nose = np.minimum(nose_tip, nose_br)
-    head = _smin(head, nose, 0.04)
-
-    # Ears
-    ear_r = _ellipsoid(pl, np.array([ 0.76, 0.02, -0.05], np.float32),
-                       np.array([0.07, 0.17, 0.09], np.float32))
-    ear_l = _ellipsoid(pl, np.array([-0.76, 0.02, -0.05], np.float32),
-                       np.array([0.07, 0.17, 0.09], np.float32))
-    ears = np.minimum(ear_r, ear_l)
-
-    # Skin = head + ears
-    skin_d = np.minimum(head, ears)
-    _update(skin_d, 1)
-
-    # ── EYES ────────────────────────────────────────────────────────────────
-    eye_y  = 0.15 + brow_r * 0.02 - eye_sq * 0.02
-    eye_rx = np.array([0.14, 0.10 + eye_w * 0.03 - eye_sq * 0.04, 0.09], np.float32)
-    eye_r  = _ellipsoid(pl, np.array([ 0.26, eye_y, 0.66], np.float32), eye_rx)
-    eye_l  = _ellipsoid(pl, np.array([-0.26, eye_y, 0.66], np.float32), eye_rx)
-    eyes_d = np.minimum(eye_r, eye_l)
-    _update(eyes_d, 2)
-
-    # Eyelids (blink) — skin-coloured box sweeping down over eye
-    if blink > 0.02:
-        lid_h = blink * 0.14
-        lid_r = _box(pl, np.array([ 0.26, eye_y + 0.07 - lid_h * 0.5, 0.67], np.float32),
-                     np.array([0.17, lid_h, 0.05], np.float32))
-        lid_l = _box(pl, np.array([-0.26, eye_y + 0.07 - lid_h * 0.5, 0.67], np.float32),
-                     np.array([0.17, lid_h, 0.05], np.float32))
-        lids_d = np.minimum(lid_r, lid_l)
-        _update(lids_d, 1)   # skin material
-
-    # ── EYEBROWS ────────────────────────────────────────────────────────────
-    brow_y = 0.34 + brow_r * 0.07 - brow_f * 0.04
-    brow_tilt = brow_f * 0.05
-    br_r = _ellipsoid(pl, np.array([ 0.26, brow_y + brow_tilt, 0.68], np.float32),
-                      np.array([0.16, 0.038, 0.045], np.float32))
-    br_l = _ellipsoid(pl, np.array([-0.26, brow_y + brow_tilt, 0.68], np.float32),
-                      np.array([0.16, 0.038, 0.045], np.float32))
-    brows_d = np.minimum(br_r, br_l)
-    _update(brows_d, 3)
-
-    # ── LIPS ────────────────────────────────────────────────────────────────
-    lip_y   = -0.37 - jaw_d * 0.04
-    lip_w   = 0.20 + mouth_wide * 0.10 + smile * 0.09
-    smile_y =  smile * 0.04 - frown * 0.04
-
-    up_lip = _ellipsoid(pl,
-                        np.array([0, lip_y + 0.062 + mouth_open * 0.03 + smile_y, 0.69], np.float32),
-                        np.array([lip_w, 0.042 + lip_round * 0.01, 0.055], np.float32))
-    lo_lip = _ellipsoid(pl,
-                        np.array([0, lip_y - 0.058 - mouth_open * 0.05 + smile_y, 0.69], np.float32),
-                        np.array([lip_w * 0.92, 0.050 + lip_round * 0.01, 0.055], np.float32))
-    lips_d = np.minimum(up_lip, lo_lip)
-    _update(lips_d, 4)
-
-    # Inner mouth / teeth (only when open enough to matter)
-    if mouth_open > 0.08:
-        inner = _ellipsoid(pl,
-                           np.array([0, lip_y + smile_y, 0.66], np.float32),
-                           np.array([lip_w * 0.80, mouth_open * 0.11, 0.07], np.float32))
-        _update(inner, 5)
-
-    return best_d, best_mat
+def _shade(normals: np.ndarray) -> np.ndarray:
+    """normals: (N, 3) unit → luminance (N,) in [0, 1]"""
+    diff1 = np.clip(normals @ _L1, 0.0, 1.0) * 0.65
+    diff2 = np.clip(normals @ _L2, 0.0, 1.0) * 0.20
+    amb   = 0.15
+    h1    = _unit(_L1 + _VIEW)
+    spec  = np.clip(normals @ h1, 0.0, 1.0) ** 20 * 0.18
+    return np.clip(amb + diff1 + diff2 + spec, 0.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
-# Normal estimation (central differences, per-material-agnostic distance)
+# Perspective projection:  world (V,3) → screen pixel coords (V,2) + depth (V,)
 # ---------------------------------------------------------------------------
-_NEPS = 0.003
-_NOFF = np.array([
-    [ _NEPS, 0, 0], [-_NEPS, 0, 0],
-    [0,  _NEPS, 0], [0, -_NEPS, 0],
-    [0, 0,  _NEPS], [0, 0, -_NEPS],
-], dtype=np.float32)
 
-
-def _normals(pts: np.ndarray, params: FaceParams) -> np.ndarray:
-    """pts: (N,3) → normals: (N,3)"""
-    N = pts.shape[0]
-    p6 = pts[:, None, :] + _NOFF[None, :, :]      # (N, 6, 3)
-    d6, _ = _scene(p6.reshape(-1, 3), params)
-    d6 = d6.reshape(N, 6)
-    n = np.stack([d6[:, 0] - d6[:, 1],
-                  d6[:, 2] - d6[:, 3],
-                  d6[:, 4] - d6[:, 5]], axis=-1)
-    return n / (np.sqrt((n * n).sum(axis=-1, keepdims=True)) + 1e-12)
+def _project(verts: np.ndarray, width: int, height: int):
+    """
+    Returns (px, py, pz) each shape (V,).
+      px in [0, 1],  py in [0, 1],  pz = Z world (higher = closer to camera)
+    Applies character-aspect correction so the face fills the terminal.
+    """
+    w  = np.clip(CAM_Z - verts[:, 2], 1e-3, None)
+    # Effective aspect accounts for character pixel dimensions
+    eff_aspect = (width * CHAR_ASPECT) / height
+    sx = verts[:, 0] / w * FOCAL
+    sy = verts[:, 1] / w * FOCAL
+    px = (sx / eff_aspect + 1.0) * 0.5    # [0, 1]
+    py = (1.0 - sy)               * 0.5   # [0, 1]  y flipped
+    return px, py, verts[:, 2]
 
 
 # ---------------------------------------------------------------------------
-# Main render function
+# Rasteriser
+# ---------------------------------------------------------------------------
+
+def _rasterise(
+    px: np.ndarray, py: np.ndarray, pz: np.ndarray,
+    vert_normals: np.ndarray,
+    faces: np.ndarray,
+    width: int, height: int,
+) -> np.ndarray:
+    """
+    Rasterise triangles into a (height, width) float32 luminance framebuffer.
+
+    px, py  — vertex screen coords in [0, 1]
+    pz      — vertex world Z  (higher = closer to camera)
+    """
+    # Scale to pixel coords
+    spx = px * width
+    spy = py * height
+
+    V0 = faces[:, 0]; V1 = faces[:, 1]; V2 = faces[:, 2]
+
+    x0 = spx[V0]; y0 = spy[V0]; z0 = pz[V0]
+    x1 = spx[V1]; y1 = spy[V1]; z1 = pz[V1]
+    x2 = spx[V2]; y2 = spy[V2]; z2 = pz[V2]
+
+    # -------------------------------------------------------------------
+    # Vectorised pre-pass: backface cull + screen bbox
+    # -------------------------------------------------------------------
+    # Screen-space signed area (positive = CCW in screen = CW in world)
+    area2 = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+
+    # Backface cull using world-space face normal dot with view direction.
+    # Cross product of edges in world space, check Z component > 0 (faces +Z camera).
+    n = vert_normals
+    # Average normal of the three vertices as a proxy for face orientation
+    nz_avg = (n[V0, 2] + n[V1, 2] + n[V2, 2]) / 3.0
+    front_facing = nz_avg > -0.1   # generous threshold keeps edge-on faces
+
+    # Screen bbox (integer, clamped)
+    xmin_f = np.minimum(np.minimum(x0, x1), x2)
+    xmax_f = np.maximum(np.maximum(x0, x1), x2)
+    ymin_f = np.minimum(np.minimum(y0, y1), y2)
+    ymax_f = np.maximum(np.maximum(y0, y1), y2)
+
+    bx0 = np.clip(np.floor(xmin_f).astype(np.int32), 0, width  - 1)
+    bx1 = np.clip(np.ceil( xmax_f).astype(np.int32), 0, width  - 1)
+    by0 = np.clip(np.floor(ymin_f).astype(np.int32), 0, height - 1)
+    by1 = np.clip(np.ceil( ymax_f).astype(np.int32), 0, height - 1)
+
+    abs_area = np.abs(area2)
+    non_empty = (bx0 <= bx1) & (by0 <= by1) & (abs_area > 1e-4)
+    visible   = np.where(front_facing & non_empty)[0]
+
+    # -------------------------------------------------------------------
+    # Z-buffer + normal buffer
+    # Higher pz = closer to camera, so initialise to -inf
+    # -------------------------------------------------------------------
+    zbuf  = np.full((height, width), -np.inf, np.float32)
+    nbuf  = np.zeros((height, width, 3), np.float32)
+
+    for fi in visible:
+        i0, i1, i2 = int(V0[fi]), int(V1[fi]), int(V2[fi])
+
+        ax, ay, az = float(x0[fi]), float(y0[fi]), float(z0[fi])
+        bx, by_, bz = float(x1[fi]), float(y1[fi]), float(z1[fi])
+        cx_, cy, cz = float(x2[fi]), float(y2[fi]), float(z2[fi])
+        a2 = float(area2[fi])
+        inv_a = 1.0 / a2   # signed inverse area
+
+        xa, xb = int(bx0[fi]), int(bx1[fi])
+        ya, yb = int(by0[fi]), int(by1[fi])
+
+        bw = xb - xa + 1
+        bh = yb - ya + 1
+
+        # Pixel-centre coordinates for the bounding box
+        gx = (np.arange(xa, xb + 1, dtype=np.float32) + 0.5)  # (bw,)
+        gy = (np.arange(ya, yb + 1, dtype=np.float32) + 0.5)  # (bh,)
+        gx2d, gy2d = np.meshgrid(gx, gy)   # (bh, bw)
+
+        # Barycentric weights via sub-triangle signed areas.
+        # w0 = area(v1,v2,p)/area2,  where area(a,b,p)=(b-a)×(p-a)
+        # inv_a = 1/area2 (signed; same as sign/abs_area)
+        w0 = ((cx_ - bx) * (gy2d - by_) - (cy - by_) * (gx2d - bx))  * inv_a
+        w1 = ((ax - cx_) * (gy2d - cy)  - (ay - cy)  * (gx2d - cx_)) * inv_a
+        w2 = 1.0 - w0 - w1
+
+        inside = (w0 >= 0.0) & (w1 >= 0.0) & (w2 >= 0.0)
+        if not inside.any():
+            continue
+
+        iz = w0 * az + w1 * bz + w2 * cz
+
+        # Z-test: only update if this triangle is closer (higher z)
+        cur_z  = zbuf[ya:yb + 1, xa:xb + 1]
+        update = inside & (iz > cur_z)
+        if not update.any():
+            continue
+
+        zbuf[ya:yb + 1, xa:xb + 1][update] = iz[update]
+
+        # Interpolate normals
+        n0 = n[i0]; n1 = n[i1]; n2 = n[i2]
+        ni = w0[..., None] * n0 + w1[..., None] * n1 + w2[..., None] * n2
+        mag = np.sqrt((ni * ni).sum(axis=-1, keepdims=True))
+        ni /= np.where(mag > 0, mag, 1.0)
+        nbuf[ya:yb + 1, xa:xb + 1][update] = ni[update]
+
+    # -------------------------------------------------------------------
+    # Shade hit pixels
+    # -------------------------------------------------------------------
+    luminance = np.zeros((height, width), np.float32)
+    hit = np.isfinite(zbuf)
+    if hit.any():
+        luminance[hit] = _shade(nbuf[hit])
+    return luminance
+
+
+# ---------------------------------------------------------------------------
+# Public entry point — same signature as the old SDF renderer
 # ---------------------------------------------------------------------------
 
 def render(width: int, height: int, params: FaceParams) -> np.ndarray:
-    """
-    Returns float32 luminance framebuffer (height, width) in [0, 1].
-    """
-    aspect = width / height
-    xs = np.linspace(-aspect, aspect, width,  dtype=np.float32)
-    ys = np.linspace( 1.0,   -1.0,   height, dtype=np.float32)
-    xv, yv = np.meshgrid(xs, ys)
+    """Returns float32 luminance framebuffer (height, width) in [0, 1]."""
+    mesh = _get_mesh()
+    verts, faces, vert_normals = mesh.get_deformed(params)
 
-    cam = np.array([0.0, 0.0, 2.8], dtype=np.float32)
-    focal = 1.8
+    # Head-pose rotation (same convention as old renderer)
+    R = _rot_y(params.total_yaw) @ _rot_x(params.total_pitch) @ _rot_z(params.total_roll)
+    verts_r   = verts        @ R.T
+    normals_r = vert_normals @ R.T
 
-    # Ray directions — normalised per pixel
-    rd = np.stack([xv, yv, np.full_like(xv, -focal)], axis=-1)  # (H, W, 3)
-    rd = rd / (_len2k(rd) + 1e-12)
+    px, py, pz = _project(verts_r, width, height)
 
-    N = height * width
-    ray_o = np.broadcast_to(cam, (N, 3)).copy()
-    ray_d = rd.reshape(N, 3)
-
-    t        = np.zeros(N,  dtype=np.float32)
-    hit      = np.zeros(N,  dtype=bool)
-    hit_mat  = np.zeros(N,  dtype=np.int32)
-    active   = np.ones(N,   dtype=bool)
-
-    for _ in range(MAX_STEPS):
-        if not active.any():
-            break
-        idx = np.where(active)[0]
-        pts = ray_o[idx] + ray_d[idx] * t[idx, None]
-        d, mat = _scene(pts, params)
-        t[idx] += d
-        newly_hit = idx[d < EPSILON]
-        hit[newly_hit]     = True
-        hit_mat[newly_hit] = mat[d < EPSILON]
-        active[newly_hit]  = False
-        active[idx[t[idx] > MAX_DIST]] = False
-
-    # Shade
-    luminance = np.zeros(N, dtype=np.float32)
-
-    if hit.any():
-        pts_hit = ray_o[hit] + ray_d[hit] * t[hit, None]
-        nrm     = _normals(pts_hit, params)
-        mat_ids = hit_mat[hit]
-
-        L1  = _norm(np.array([ 1.2,  1.8,  2.5], np.float32)[None])
-        L2  = _norm(np.array([-0.8,  0.4,  1.5], np.float32)[None])
-        vd  = _norm(-ray_d[hit])
-
-        diff1 = np.clip(_dot(nrm, L1), 0, 1) * 0.65
-        diff2 = np.clip(_dot(nrm, L2), 0, 1) * 0.20
-        amb   = 0.15
-
-        refl  = nrm * 2.0 * np.clip(_dot(nrm, L1), 0, 1)[:, None] - L1
-        spec  = np.clip(_dot(refl, vd), 0, 1) ** 20 * 0.18
-
-        light = np.clip(amb + diff1 + diff2 + spec, 0.0, 1.0)
-
-        # Per-material luminance
-        base  = np.array([MAT_BASE[m] for m in mat_ids], dtype=np.float32)
-        lscale = np.array([MAT_LIGHT[m] for m in mat_ids], dtype=np.float32)
-
-        luminance[hit] = np.clip(base + (light - 0.5) * lscale * 0.6, 0.0, 1.0)
-
-    return luminance.reshape(height, width)
+    return _rasterise(px, py, pz, normals_r, faces, width, height)
