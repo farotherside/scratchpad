@@ -86,6 +86,10 @@ def parse_args():
         help="ASCII brightness ramp style (default: dense)"
     )
     parser.add_argument(
+        "--static", type=float, default=0.6, metavar="INTENSITY",
+        help="Background static intensity 0.0=off 1.0=full (default: 0.6)"
+    )
+    parser.add_argument(
         "--render-width", type=int, default=None,
         help="Override render framebuffer width (default: terminal width * 2)"
     )
@@ -352,7 +356,7 @@ def run(args):
     # -----------------------------------------------------------------------
     # Render loop
     # -----------------------------------------------------------------------
-    with TerminalDisplay(use_aalib=True, ramp=ramp) as td:
+    with TerminalDisplay(use_aalib=True, ramp=ramp, static=args.static) as td:
         if idle_mode:
             status = "Idle  [q to quit]"
         elif demo_mode:
