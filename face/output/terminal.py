@@ -195,8 +195,10 @@ class AalibRenderer:
             self._Image = Image
         except ImportError:
             raise ImportError("Pillow (PIL) not available — needed by aalib backend")
+        self._rng = np.random.default_rng()
 
-    def render(self, framebuf: np.ndarray, cols: int, rows: int) -> str:
+    def render(self, framebuf: np.ndarray, cols: int, rows: int,
+               static: float = 0.0) -> str:
         """Convert float32 (H, W) framebuf → ASCII string via aalib."""
         aa = self._aa
         Image = self._Image
@@ -209,6 +211,18 @@ class AalibRenderer:
         # render() returns bytes on some aalib versions
         if isinstance(result, bytes):
             result = result.decode("ascii", errors="replace")
+
+        # Apply BB-style static overlay using the original framebuf as mask
+        if static > 0.0:
+            lines = result.split("\n")
+            # Downscale framebuf to (rows, cols) for background mask
+            h, w = framebuf.shape
+            row_idx = np.linspace(0, h - 1, rows).astype(int)
+            col_idx = np.linspace(0, w - 1, cols).astype(int)
+            small = framebuf[np.ix_(row_idx, col_idx)]
+            lines = _apply_static(lines, small, static, self._rng)
+            result = "\n".join(lines)
+
         return result
 
 
@@ -390,11 +404,8 @@ class TerminalDisplay:
         overlay_rows = (1 if status_line else 0) + (1 if debug_line else 0)
         render_rows = max(1, rows - overlay_rows)
 
-        # Pass static intensity to FallbackRenderer; aalib renderer ignores it
-        if hasattr(self._renderer, 'render') and isinstance(self._renderer, FallbackRenderer):
-            art = self._renderer.render(framebuf, cols, render_rows, static=self.static)
-        else:
-            art = self._renderer.render(framebuf, cols, render_rows)
+        # Both renderers now accept static= kwarg
+        art = self._renderer.render(framebuf, cols, render_rows, static=self.static)
         lines = art.split("\n")
 
         if self._stdscr:
