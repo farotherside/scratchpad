@@ -219,7 +219,7 @@ def _load_lipsync(
 # ---------------------------------------------------------------------------
 _FADE_IN_DUR   = 1.5   # seconds: black fades to static
 _STATIC_HOLD   = 2.0   # seconds: static holds (the flat "water surface")
-_EMERGE_DUR    = 2.0   # seconds: face pushes forward through the static plane
+_EMERGE_DUR    = 6.0   # seconds: face pushes forward through the static plane
 _INTRO_TOTAL   = _FADE_IN_DUR + _STATIC_HOLD + _EMERGE_DUR
 
 
@@ -227,6 +227,8 @@ def _smoothstep(t: float) -> float:
     t = max(0.0, min(1.0, t))
     return t * t * (3.0 - 2.0 * t)
 
+
+_SOLIDIFY_DEPTH = 0.40  # fraction of z_range over which static → clean shading
 
 def _zclip_face(
     face_lum: "np.ndarray",
@@ -236,8 +238,10 @@ def _zclip_face(
     """Reveal face pixels progressively via a Z-depth clip plane.
 
     ease — 0.0 = nothing visible, 1.0 = fully revealed.
-    Returns (h, w) luminance with non-emerged pixels at 0 (black).
-    The terminal's StaticLayer fills those black pixels with static.
+
+    Just-emerged pixels stay at 0 luminance so the terminal's StaticLayer
+    renders them as static (same look as background).  As the clip plane
+    sweeps past, pixels gradually solidify from static to clean Phong shading.
     """
     has_face = np.isfinite(face_depth) & (face_depth > -100)
 
@@ -256,7 +260,12 @@ def _zclip_face(
     emerged = has_face & (face_depth >= clip_z)
 
     if emerged.any():
-        result[emerged] = face_lum[emerged]
+        # How far past the clip plane each pixel is (0 = just surfaced)
+        depth_past = face_depth[emerged] - clip_z
+        solidify = np.clip(depth_past / (z_range * _SOLIDIFY_DEPTH), 0.0, 1.0)
+        # solidify 0 → luminance stays 0 (static fills it)
+        # solidify 1 → full Phong shading
+        result[emerged] = face_lum[emerged] * solidify
 
     return result
 
