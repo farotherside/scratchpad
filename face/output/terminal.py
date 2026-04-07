@@ -10,6 +10,7 @@ Handles SIGWINCH for live terminal resize.
 
 import curses
 import os
+import random
 import signal
 import sys
 import time
@@ -107,6 +108,78 @@ def _detect_colors() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Static / noise effect  (inspired by BB demo's scene1.c)
+#
+# BB writes directly into aalib's textbuffer/attrbuffer using HEXA chars
+# (random hex digits or spaces in a 3-wide pattern) with per-row random
+# horizontal shifts and a randomval parameter on the render pipeline.
+#
+# We replicate the same idea at the character level: after downscaling the
+# framebuffer to (rows, cols), we identify background pixels (luminance below
+# a threshold) and overwrite them with noise characters using the same
+# 3-wide hex pattern + random per-row shifts.
+# ---------------------------------------------------------------------------
+
+# Characters used for noise — hex-like, visually dense
+_HEXA = "0123456789ABCDEF"
+_STATIC_BG_CHARS = " " * 6 + "." * 3 + "`" * 2 + _HEXA   # weighted toward sparse
+
+
+def _make_static_row(cols: int, shift: int, intensity: float,
+                     rng: np.random.Generator) -> list[str]:
+    """Generate one row of BB-style hex static.
+
+    intensity: 0.0 = silent, 1.0 = full noise
+    shift:     horizontal offset for the 3-wide pattern (0-2)
+    """
+    chars = []
+    for x in range(cols):
+        if rng.random() > intensity:
+            chars.append(" ")   # sparse — leave space
+            continue
+        # BB pattern: every 3rd column (offset by shift) gets a hex char
+        if (x - shift) % 3 == 0:
+            chars.append(_HEXA[rng.integers(0, len(_HEXA))])
+        else:
+            chars.append(" ")
+    return chars
+
+
+def _apply_static(lines: list[str], small: np.ndarray,
+                  intensity: float, rng: np.random.Generator,
+                  bg_threshold: float = 0.08) -> list[str]:
+    """Overwrite background positions in rendered ASCII lines with noise.
+
+    lines      : list of rendered ASCII strings, one per row
+    small      : float32 (rows, cols) luminance buffer already downscaled
+    intensity  : 0..1 static intensity
+    bg_threshold: pixels below this luminance are considered background
+    """
+    if intensity <= 0.0:
+        return lines
+
+    rows, cols = small.shape
+    out = []
+    for r, line in enumerate(lines[:rows]):
+        row_lum = small[r]                          # (cols,) float32
+        bg_mask = row_lum < bg_threshold            # True where background
+        if not bg_mask.any():
+            out.append(line)
+            continue
+
+        # Random per-row horizontal shift (BB's randshift)
+        shift = rng.integers(0, 3) if rng.random() < intensity else 0
+        noise = _make_static_row(cols, shift, intensity, rng)
+
+        chars = list(line.ljust(cols)[:cols])
+        for x in range(min(cols, len(bg_mask))):
+            if bg_mask[x]:
+                chars[x] = noise[x]
+        out.append("".join(chars))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Renderer classes
 # ---------------------------------------------------------------------------
 
@@ -144,9 +217,14 @@ class FallbackRenderer:
 
     def __init__(self, ramp: str = _RAMP_70):
         self._ramp = ramp
+        self._rng = np.random.default_rng()
 
-    def render(self, framebuf: np.ndarray, cols: int, rows: int) -> str:
-        """Downscale framebuf to (rows, cols) and map luminance → chars."""
+    def render(self, framebuf: np.ndarray, cols: int, rows: int,
+               static: float = 0.0) -> str:
+        """Downscale framebuf to (rows, cols) and map luminance → chars.
+
+        static: 0.0 = no noise, 1.0 = full BB-style hex static in background
+        """
         h, w = framebuf.shape
 
         # Bilinear downscale via numpy slicing (fast approximation)
@@ -162,6 +240,11 @@ class FallbackRenderer:
         for row in small:
             chars = "".join(ramp[int(v * ramp_len)] for v in row)
             lines.append(chars)
+
+        # Apply BB-style background static if requested
+        if static > 0.0:
+            lines = _apply_static(lines, small, static, self._rng)
+
         return "\n".join(lines)
 
 
@@ -181,11 +264,13 @@ class TerminalDisplay:
                 time.sleep(frame_delay)
     """
 
-    def __init__(self, use_aalib: bool = True, ramp: str = _RAMP_70):
+    def __init__(self, use_aalib: bool = True, ramp: str = _RAMP_70,
+                 static: float = 0.0):
         self._use_aalib = use_aalib
         self._ramp = ramp
         self._stdscr = None
         self._renderer = None
+        self.static = static          # 0.0 = off, 1.0 = full BB static
         # FPS tracking
         self._frame_times: deque = deque(maxlen=30)
         # Debug info (populated in __enter__)
@@ -305,7 +390,11 @@ class TerminalDisplay:
         overlay_rows = (1 if status_line else 0) + (1 if debug_line else 0)
         render_rows = max(1, rows - overlay_rows)
 
-        art = self._renderer.render(framebuf, cols, render_rows)
+        # Pass static intensity to FallbackRenderer; aalib renderer ignores it
+        if hasattr(self._renderer, 'render') and isinstance(self._renderer, FallbackRenderer):
+            art = self._renderer.render(framebuf, cols, render_rows, static=self.static)
+        else:
+            art = self._renderer.render(framebuf, cols, render_rows)
         lines = art.split("\n")
 
         if self._stdscr:
