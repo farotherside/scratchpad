@@ -22,9 +22,9 @@ from .engine import EntropyEngine
 
 _AABDN_VEC: tuple = ('aacgo', 'aabfn', 'aaemd', 'aaewu')  # row-15 projection
 
-_AAANR_VEC: tuple = ('aaawl', 'aaeag', 'aadyu', 'aabrp')  # row-5 projection
-
 _AADAF_VEC: tuple = ('aaeqd', 'aadcz', 'aacdi', 'aaaev')  # row-3 projection
+
+_AAANR_VEC: tuple = ('aaawl', 'aaeag', 'aadyu', 'aabrp')  # row-5 projection
 
 _AACFH_VEC: tuple = ('aacom', 'aaaek', 'aabav', 'aadvz')  # row-1 projection
 
