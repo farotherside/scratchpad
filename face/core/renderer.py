@@ -109,14 +109,16 @@ def _project(verts: np.ndarray, width: int, height: int):
 def _rasterise(
     px: np.ndarray, py: np.ndarray, pz: np.ndarray,
     vert_normals: np.ndarray,
+    vert_mat: np.ndarray,
     faces: np.ndarray,
     width: int, height: int,
 ) -> np.ndarray:
     """
     Rasterise triangles into a (height, width) float32 luminance framebuffer.
 
-    px, py  — vertex screen coords in [0, 1]
-    pz      — vertex world Z  (higher = closer to camera)
+    px, py    — vertex screen coords in [0, 1]
+    pz        — vertex world Z  (higher = closer to camera)
+    vert_mat  — per-vertex material ID (int32)
     """
     # Scale to pixel coords
     spx = px * width
@@ -157,11 +159,12 @@ def _rasterise(
     visible   = np.where(front_facing & non_empty)[0]
 
     # -------------------------------------------------------------------
-    # Z-buffer + normal buffer
+    # Z-buffer + normal buffer + material buffer
     # Higher pz = closer to camera, so initialise to -inf
     # -------------------------------------------------------------------
     zbuf  = np.full((height, width), -np.inf, np.float32)
     nbuf  = np.zeros((height, width, 3), np.float32)
+    mbuf  = np.zeros((height, width), np.int32)   # material IDs
 
     for fi in visible:
         i0, i1, i2 = int(V0[fi]), int(V1[fi]), int(V2[fi])
@@ -211,13 +214,25 @@ def _rasterise(
         ni /= np.where(mag > 0, mag, 1.0)
         nbuf[ya:yb + 1, xa:xb + 1][update] = ni[update]
 
+        # Material: pick dominant vertex (highest barycentric weight)
+        m0, m1, m2 = int(vert_mat[i0]), int(vert_mat[i1]), int(vert_mat[i2])
+        # Use the material of the vertex with the highest avg bary weight
+        tri_mat = m0 if m0 == m1 or m0 == m2 else (m1 if m1 == m2 else m0)
+        mbuf[ya:yb + 1, xa:xb + 1][update] = tri_mat
+
     # -------------------------------------------------------------------
-    # Shade hit pixels
+    # Shade hit pixels — Phong shading modulated by per-material luminance
     # -------------------------------------------------------------------
+    from core.mesh import MeshFace
+    mat_lum = MeshFace.MAT_LUM
+
     luminance = np.zeros((height, width), np.float32)
     hit = np.isfinite(zbuf)
     if hit.any():
-        luminance[hit] = _shade(nbuf[hit])
+        phong = _shade(nbuf[hit])                          # [0, 1]
+        mids  = mbuf[hit]                                  # material IDs
+        scale = np.array([mat_lum[m] for m in mids], dtype=np.float32)
+        luminance[hit] = np.clip(phong * scale, 0.0, 1.0)
     return luminance, zbuf
 
 
@@ -233,7 +248,7 @@ def render(width: int, height: int, params: FaceParams,
     per-pixel world-Z values (-inf for background, higher = closer to camera).
     """
     mesh = _get_mesh()
-    verts, faces, vert_normals = mesh.get_deformed(params)
+    verts, faces, vert_normals, vert_mat = mesh.get_deformed(params)
 
     # Head-pose rotation (same convention as old renderer)
     R = _rot_y(params.total_yaw) @ _rot_x(params.total_pitch) @ _rot_z(params.total_roll)
@@ -242,7 +257,7 @@ def render(width: int, height: int, params: FaceParams,
 
     px, py, pz = _project(verts_r, width, height)
 
-    luminance, zbuf = _rasterise(px, py, pz, normals_r, faces, width, height)
+    luminance, zbuf = _rasterise(px, py, pz, normals_r, vert_mat, faces, width, height)
     if return_depth:
         return luminance, zbuf
     return luminance

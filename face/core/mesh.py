@@ -159,6 +159,53 @@ class MeshFace:
         self.faces         = faces           # (F, 3) int32
 
         self._build_weights(vn)
+        self._build_material_ids(vn)
+
+    # ------------------------------------------------------------------
+    # Material IDs
+    # 0 = skin (default)
+    # 1 = eye socket / iris
+    # 2 = eyebrow
+    # 3 = lips
+    # 4 = inner mouth / teeth
+    # ------------------------------------------------------------------
+    MAT_SKIN  = 0
+    MAT_EYE   = 1
+    MAT_BROW  = 2
+    MAT_LIP   = 3
+    MAT_MOUTH = 4
+
+    # Base luminance multiplier per material (applied on top of Phong)
+    MAT_LUM = {
+        0: 1.00,   # skin — full shading
+        1: 0.30,   # eye socket — dark
+        2: 0.45,   # eyebrow — dark-ish
+        3: 0.75,   # lips — slightly muted
+        4: 0.90,   # inner mouth — near-white when visible
+    }
+
+    def _build_material_ids(self, v: np.ndarray):
+        """Assign a material ID to each vertex by dominant Gaussian region."""
+        n = len(v)
+        mat = np.zeros(n, dtype=np.int32)   # default: skin
+
+        # Narrower Gaussians for material classification (tighter than morphs)
+        w_eye   = (_gauss(v, [ 0.23,  0.22, 0.63], 0.09) +
+                   _gauss(v, [-0.23,  0.22, 0.63], 0.09))
+        w_brow  = (_gauss(v, [ 0.25,  0.40, 0.55], 0.10) +
+                   _gauss(v, [-0.25,  0.40, 0.55], 0.10))
+        w_lip   = (_gauss(v, [ 0.00, -0.08, 0.70], 0.10) +
+                   _gauss(v, [ 0.00, -0.22, 0.68], 0.10))
+        w_mouth = _gauss(v,  [ 0.00, -0.15, 0.64], 0.07)
+
+        # Assign by highest weight, in priority order
+        # (mouth interior is inside lip region so check first)
+        mat[w_mouth > 0.4]                        = self.MAT_MOUTH
+        mat[(w_lip   > 0.4) & (mat == 0)]         = self.MAT_LIP
+        mat[(w_eye   > 0.35) & (mat == 0)]        = self.MAT_EYE
+        mat[(w_brow  > 0.35) & (mat == 0)]        = self.MAT_BROW
+
+        self._vert_mat = mat   # (V,) int32
 
     # ------------------------------------------------------------------
     def _build_weights(self, v: np.ndarray):
@@ -249,4 +296,4 @@ class MeshFace:
         v[:, 1] -= eyes * eye_sq * 0.03
 
         # Base normals are close enough for the small deformations used
-        return v, self.faces, self._base_normals
+        return v, self.faces, self._base_normals, self._vert_mat
