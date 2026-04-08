@@ -118,11 +118,24 @@ def _detect_colors() -> str:
 # (A_DIM / A_NORMAL / A_BOLD), giving the flickery TV-static look.
 # ---------------------------------------------------------------------------
 
-# Weighted character pool: spaces dominate for sparsity, hex for density
-_HEXA       = "0123456789ABCDEF"
-# Mixed pool: lots of spaces + punctuation + hex, weighted toward sparse
-_NOISE_POOL = (" " * 12 + "." * 4 + ":" * 2 + "`" * 2 + "'" * 2
-               + _HEXA + _HEXA[:8])   # hex doubled for more density
+# Static character pool — restricted to:
+#   Alphanumeric symmetric only: characters that look the same (or close)
+#     under horizontal/vertical reflection: 0 1 8 A H I M O T U V W X Y
+#   Non-alphanumerics: | - + = * @ # % : . space
+#
+# Excluded: any alphanumeric that is NOT symmetric
+#   (e.g. 2 3 4 5 6 7 9 B C D E F G J K L N P Q R S Z
+#         and lowercase letters)
+#
+# Spaces weighted heavily so the static feels sparse and flickery.
+_STATIC_CHARS = "018AHIMOTUVWXY"
+_STATIC_PUNCT = "|-+=*@#%:."
+_NOISE_POOL   = (" " * 14          # sparse gaps
+                 + "." * 4          # very light dots
+                 + ":" * 2          # light
+                 + _STATIC_PUNCT    # medium density
+                 + _STATIC_CHARS    # main characters
+                 + _STATIC_CHARS)   # doubled for weight
 
 # Curses attribute levels for static cells — populated after curses init
 _STATIC_ATTRS = None   # set to list[int] on first use
