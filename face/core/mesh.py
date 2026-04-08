@@ -24,9 +24,11 @@ ASSETS_DIR = Path(__file__).parent.parent / "assets"
 
 # Registry of available models: name → OBJ filename
 MODEL_REGISTRY: dict[str, str] = {
-    "generic":   "generic_face.obj",
-    "teen_head": "teen_head.obj",
+    "generic_man":  "generic_man.obj",
+    "generic_face": "generic_face.obj",
+    "teen_head":    "teen_head.obj",
 }
+DEFAULT_MODEL = "generic_man"
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +154,7 @@ class MeshFace:
 
     def __init__(self, obj_path: str | None = None, model: str | None = None):
         if obj_path is None:
-            name = model or "generic"
+            name = model or DEFAULT_MODEL
             if name not in MODEL_REGISTRY:
                 raise ValueError(
                     f"Unknown model {name!r}. "
@@ -162,9 +164,16 @@ class MeshFace:
         path = obj_path
         verts, faces, vert_normals = _load_obj(path)
 
-        # Centre on vertex centroid, scale so the largest half-extent = 1
-        self._centroid = verts.mean(axis=0)
-        vc = verts - self._centroid
+        # Centre the mesh.  For X we use the median of front-facing vertices
+        # (high Z) so the face is centred even if the back-of-head geometry
+        # is asymmetric.  Y and Z use the simple midpoint.
+        centroid = verts.mean(axis=0).copy()
+        z_thresh = np.percentile(verts[:, 2], 70)
+        front = verts[verts[:, 2] >= z_thresh]
+        if len(front) > 20:
+            centroid[0] = float(np.median(front[:, 0]))
+        vc = verts - centroid
+        self._centroid = centroid
         self._scale = float(np.abs(vc).max())
         vn = (vc / self._scale).astype(np.float32)
 
