@@ -30,6 +30,12 @@ MODEL_REGISTRY: dict[str, str] = {
 }
 DEFAULT_MODEL = "generic_man"
 
+# Per-model Y-axis rotation correction (degrees, counter-clockwise from above).
+# Applied once at load time so all models face +Z (toward camera).
+MODEL_Y_ROTATION: dict[str, float] = {
+    "generic_man": 90.0,
+}
+
 
 # ---------------------------------------------------------------------------
 # OBJ loader
@@ -153,8 +159,8 @@ class MeshFace:
     DECIMATE_GRID = 10
 
     def __init__(self, obj_path: str | None = None, model: str | None = None):
+        name = model or DEFAULT_MODEL
         if obj_path is None:
-            name = model or DEFAULT_MODEL
             if name not in MODEL_REGISTRY:
                 raise ValueError(
                     f"Unknown model {name!r}. "
@@ -163,6 +169,17 @@ class MeshFace:
             obj_path = str(ASSETS_DIR / MODEL_REGISTRY[name])
         path = obj_path
         verts, faces, vert_normals = _load_obj(path)
+
+        # Apply per-model Y-rotation so the face points toward +Z
+        y_deg = MODEL_Y_ROTATION.get(name, 0.0)
+        if y_deg:
+            rad = np.radians(y_deg)
+            c, s = np.cos(rad), np.sin(rad)
+            R = np.array([[c, 0, s],
+                          [0, 1, 0],
+                          [-s, 0, c]], dtype=np.float32)
+            verts = verts @ R.T
+            vert_normals = vert_normals @ R.T
 
         # Centre the mesh.  For X we use the median of front-facing vertices
         # (high Z) so the face is centred even if the back-of-head geometry
