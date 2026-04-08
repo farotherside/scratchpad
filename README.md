@@ -26,8 +26,9 @@ An animated 3D face rendered entirely in ASCII art in a terminal window,
 synchronized to ElevenLabs TTS audio output.
 
 **Key features:**
-- SDF (Signed Distance Field) ray marcher — no meshes, no assets, pure numpy
-- Per-material shading: eyes, brows, lips, teeth each have distinct luminance
+- Real OBJ mesh (`teen_head.obj`) with grid decimation to ~1 K triangles at load time
+- Triangle rasteriser with z-buffer, barycentric interpolation, and Phong shading — pure numpy
+- Gaussian blend-shape deformer: jaw, lips, brows, cheeks, eyes — all driven per frame
 - 9 viseme groups mapped from ElevenLabs per-character timestamps for lipsync
 - 5 emotion blend shapes (neutral, happy, sad, surprised, angry)
 - Idle head motion, spontaneous blinking, smooth keyframe interpolation
