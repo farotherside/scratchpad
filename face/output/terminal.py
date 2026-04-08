@@ -137,34 +137,41 @@ _NOISE_POOL   = (" " * 14          # sparse gaps
                  + _STATIC_CHARS    # main characters
                  + _STATIC_CHARS)   # doubled for weight
 
-# Curses attribute levels for static cells — populated after curses init
-_STATIC_ATTRS = None   # set to list[int] on first use
+# ANSI escape sequences for static brightness levels.
+# Three tiers: dim white, normal white, bright white.
+# Using raw ANSI instead of curses color pairs because curses A_BOLD
+# only affects weight on most modern terminals — it does not produce
+# a visibly brighter luminance.  \033[1;37m (bold+white) reliably
+# renders as bright white in virtually all terminal emulators.
+_ANSI_DIM    = "\033[2;37m"   # dim white
+_ANSI_NORMAL = "\033[37m"     # normal white
+_ANSI_BRIGHT = "\033[1;37m"   # bold / bright white
+_ANSI_RESET  = "\033[0m"
 
-
-def _get_static_attrs():
-    """Return curses attribute constants (lazy, after curses.initscr)."""
-    global _STATIC_ATTRS
-    if _STATIC_ATTRS is None:
-        _STATIC_ATTRS = [
-            curses.A_DIM,
-            curses.A_NORMAL,
-            curses.A_NORMAL,   # weight normal higher
-            curses.A_BOLD,
-        ]
-    return _STATIC_ATTRS
+# Weighted pool: dim appears most, bright least — gives a realistic
+# CRT static feel where only occasional cells flash to full brightness.
+_ANSI_LEVELS = [
+    _ANSI_DIM,
+    _ANSI_NORMAL,
+    _ANSI_NORMAL,   # weight normal higher
+    _ANSI_BRIGHT,
+]
 
 
 class StaticLayer:
-    """Per-frame noise layer: (rows, cols) arrays of chars + curses attrs.
+    """Per-frame noise layer: (rows, cols) arrays of chars + ANSI escape codes.
 
     Call .generate(rows, cols, small, intensity) each frame to produce
-    updated noise, then use .chars and .attrs to write per-cell to curses.
+    updated noise, then use .chars and .ansi to write per-cell to the terminal.
+    Static cells are written via raw sys.stdout ANSI sequences rather than
+    curses attributes so that bright white (\033[1;37m) renders correctly —
+    curses A_BOLD only affects weight on modern terminals, not luminance.
     """
 
     def __init__(self):
         self._rng = np.random.default_rng()
-        self.chars: list[list[str]] = []   # [row][col] -> char or None
-        self.attrs: list[list[int]] = []   # [row][col] -> curses attr
+        self.chars: list[list[str]] = []    # [row][col] -> char or None
+        self.ansi:  list[list[str]] = []    # [row][col] -> ANSI escape string
 
     def generate(self, rows: int, cols: int, small: np.ndarray,
                  intensity: float, bg_threshold: float = 0.20):
@@ -176,11 +183,11 @@ class StaticLayer:
         rng = self._rng
         pool = _NOISE_POOL
         pool_len = len(pool)
-        attr_list = _get_static_attrs()
-        n_attrs = len(attr_list)
+        levels = _ANSI_LEVELS
+        n_levels = len(levels)
 
         row_chars = []
-        row_attrs = []
+        row_ansi  = []
 
         for r in range(min(rows, small.shape[0])):
             row_lum = small[r]
@@ -194,7 +201,7 @@ class StaticLayer:
             for x in range(min(cols, small.shape[1])):
                 if not bg_mask[x] or rng.random() > intensity:
                     crow.append(None)   # None = leave face char alone
-                    arow.append(curses.A_NORMAL)
+                    arow.append(_ANSI_NORMAL)
                     continue
                 # BB 3-wide pattern with random shift
                 if (x - shift) % 3 == 0:
@@ -202,24 +209,30 @@ class StaticLayer:
                 else:
                     # off-pattern: mostly spaces, occasional light char
                     ch = pool[int(rng.integers(0, min(16, pool_len)))]
-                attr = attr_list[int(rng.integers(0, n_attrs))]
+                ansi = levels[int(rng.integers(0, n_levels))]
                 crow.append(ch)
-                arow.append(attr)
+                arow.append(ansi)
             row_chars.append(crow)
-            row_attrs.append(arow)
+            row_ansi.append(arow)
 
         self.chars = row_chars
-        self.attrs = row_attrs
+        self.ansi  = row_ansi
 
 
 def _apply_static_to_string(lines: list[str], small: np.ndarray,
                              intensity: float, rng: np.random.Generator,
                              bg_threshold: float = 0.20) -> list[str]:
-    """String-only static overlay for non-curses paths (no attr support)."""
+    """String-only static overlay for non-curses paths.
+
+    Inlines ANSI escape codes directly into each line string so that
+    dim / normal / bright white renders correctly even without curses.
+    """
     if intensity <= 0.0:
         return lines
     pool = _NOISE_POOL
     pool_len = len(pool)
+    levels = _ANSI_LEVELS
+    n_levels = len(levels)
     rows, cols = small.shape
     out = []
     for r, line in enumerate(lines[:rows]):
@@ -233,9 +246,11 @@ def _apply_static_to_string(lines: list[str], small: np.ndarray,
         for x in range(min(cols, len(bg_mask))):
             if bg_mask[x] and rng.random() <= intensity:
                 if (x - shift) % 3 == 0:
-                    chars[x] = pool[int(rng.integers(0, pool_len))]
+                    ch = pool[int(rng.integers(0, pool_len))]
                 else:
-                    chars[x] = pool[int(rng.integers(0, min(16, pool_len)))]
+                    ch = pool[int(rng.integers(0, min(16, pool_len)))]
+                ansi = levels[int(rng.integers(0, n_levels))]
+                chars[x] = f"{ansi}{ch}{_ANSI_RESET}"
         out.append("".join(chars))
     return out
 
@@ -466,10 +481,10 @@ class TerminalDisplay:
             if self.static > 0.0 and _small is not None:
                 self._static_layer.generate(render_rows, safe_w, _small, self.static)
                 sl_chars = self._static_layer.chars
-                sl_attrs = self._static_layer.attrs
+                sl_ansi  = self._static_layer.ansi
             else:
                 sl_chars = None
-                sl_attrs = None
+                sl_ansi  = None
 
             for i, line in enumerate(lines[:render_rows]):
                 # Write face art first
@@ -477,16 +492,23 @@ class TerminalDisplay:
                     scr.addnstr(i, 0, line.ljust(safe_w)[:safe_w], safe_w)
                 except curses.error:
                     pass
-                # Then overwrite background cells with noise + random attrs
+                # Then overwrite background cells with noise via raw ANSI.
+                # sys.stdout is used directly so that \033[1;37m (bright white)
+                # is honoured — curses A_BOLD does not produce bright luminance
+                # on modern terminals.
                 if sl_chars and i < len(sl_chars):
                     crow = sl_chars[i]
-                    arow = sl_attrs[i]
-                    for x, (ch, attr) in enumerate(zip(crow, arow)):
+                    arow = sl_ansi[i]
+                    ansi_writes = []
+                    for x, (ch, ansi) in enumerate(zip(crow, arow)):
                         if ch is not None and x < safe_w:
-                            try:
-                                scr.addstr(i, x, ch, attr)
-                            except curses.error:
-                                pass
+                            # CSI cursor position is 1-based: row i+1, col x+1
+                            ansi_writes.append(
+                                f"\033[{i + 1};{x + 1}H{ansi}{ch}{_ANSI_RESET}"
+                            )
+                    if ansi_writes:
+                        sys.stdout.write("".join(ansi_writes))
+                        sys.stdout.flush()
             # Debug line sits above status line
             if debug_line and status_line:
                 try:
