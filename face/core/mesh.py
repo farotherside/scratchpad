@@ -33,7 +33,7 @@ DEFAULT_MODEL = "generic_man"
 # Per-model Y-axis rotation correction (degrees, counter-clockwise from above).
 # Applied once at load time so all models face +Z (toward camera).
 MODEL_Y_ROTATION: dict[str, float] = {
-    "generic_man": 90.0,
+    "generic_man": 270.0,
 }
 
 
