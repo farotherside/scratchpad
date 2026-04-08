@@ -98,9 +98,9 @@ def parse_args():
         help="Override render framebuffer height (default: terminal height * 4)"
     )
     parser.add_argument(
-        "--model", default="generic",
-        help="3D face model to use (default: generic). "
-             "Available: generic, teen_head"
+        "--model", default="generic_man",
+        help="3D face model to use (default: generic_man). "
+             "Available: generic_man, generic_face, teen_head"
     )
     return parser.parse_args()
 
