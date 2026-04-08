@@ -305,8 +305,14 @@ _FACE_DARK_MAX   = 20   # index ceiling for dark tier
 _FACE_MID_MAX    = 36   # index ceiling for mid tier
 # bright tier uses the full pool
 
-_FACE_DARK_THRESH  = 0.35
-_FACE_BRIGHT_THRESH = 0.65
+# Luminance thresholds for face pixel bucketing.
+# The mesh rasteriser output sits in roughly [0, 1] but face pixels
+# cluster tightly near 0 — the ambient floor is ~0.15 and most shaded
+# geometry falls below 0.50.  Use low thresholds so mid/bright tiers
+# actually fire on typical face pixels.
+_FACE_DARK_THRESH   = 0.20   # below this → dim white
+_FACE_MID_THRESH    = 0.40   # below this → normal white
+# above _FACE_MID_THRESH → bright white
 
 
 class FallbackRenderer:
@@ -323,10 +329,15 @@ class FallbackRenderer:
         self._ramp = ramp   # kept for framebuf_to_str compat; unused here
         self._rng = np.random.default_rng()
 
-    def render(self, framebuf: np.ndarray, cols: int, rows: int,
-               bg_threshold: float = 0.20) -> str:
+    def render(self, framebuf: np.ndarray, cols: int, rows: int) -> str:
         """Downscale framebuf to (rows, cols) and render face pixels as
-        ANSI-coloured static characters."""
+        ANSI-coloured static characters.
+
+        Background detection: a pixel is background only if its luminance
+        is exactly 0 (the mesh rasteriser sets unlit pixels to 0.0).
+        Face pixels are bucketed into dim / normal / bright tiers by
+        luminance and rendered with matching ANSI white levels.
+        """
         h, w = framebuf.shape
         rng = self._rng
         pool = _NOISE_POOL
@@ -340,14 +351,14 @@ class FallbackRenderer:
         for row in small:
             parts = []
             for lum in row:
-                if lum <= bg_threshold:
-                    # Background — leave as space; StaticLayer fills this in
+                if lum == 0.0:
+                    # True background (unhit by rasteriser) — StaticLayer fills
                     parts.append(" ")
                 elif lum < _FACE_DARK_THRESH:
                     # Dark face region — dim white, sparse chars
                     ch = pool[int(rng.integers(0, _FACE_DARK_MAX))]
                     parts.append(f"{_ANSI_DIM}{ch}{_ANSI_RESET}")
-                elif lum < _FACE_BRIGHT_THRESH:
+                elif lum < _FACE_MID_THRESH:
                     # Mid face region — normal white, mid-weight chars
                     ch = pool[int(rng.integers(0, _FACE_MID_MAX))]
                     parts.append(f"{_ANSI_NORMAL}{ch}{_ANSI_RESET}")
