@@ -526,8 +526,6 @@ class TerminalDisplay:
         lines = art.split("\n")
 
         if self._stdscr:
-            scr = self._stdscr
-            scr.erase()
             safe_w = max(1, cols - 1)
 
             # Generate static layer for this frame
@@ -539,13 +537,15 @@ class TerminalDisplay:
                 sl_chars = None
                 sl_ansi  = None
 
-            # Face lines contain embedded ANSI escapes (static shader);
-            # curses addnstr would corrupt them.  Write all rows via
-            # sys.stdout using absolute cursor positioning, then let
-            # curses handle the overlay lines (debug / status) normally.
-            frame_buf = []
+            # All frame content is written via raw ANSI to stdout.
+            # curses erase()+refresh() would overwrite our ANSI-escaped face
+            # chars with its own blank buffer, so we bypass curses entirely
+            # for frame rendering and use it only for terminal setup.
+            frame_buf = [
+                "\033[2J",      # erase entire display
+                "\033[H",       # cursor home
+            ]
             for i, line in enumerate(lines[:render_rows]):
-                # Position cursor at start of row, write face line
                 frame_buf.append(f"\033[{i + 1};1H{line}")
 
                 # Overwrite background cells with static noise
@@ -557,25 +557,18 @@ class TerminalDisplay:
                             frame_buf.append(
                                 f"\033[{i + 1};{x + 1}H{ansi}{ch}{_ANSI_RESET}"
                             )
+
+            # Overlay lines written inline
+            if debug_line and status_line:
+                frame_buf.append(f"\033[{rows - 1};1H{debug_line[:safe_w]}")
+                frame_buf.append(f"\033[{rows};1H{status_line[:safe_w]}")
+            elif debug_line:
+                frame_buf.append(f"\033[{rows};1H{debug_line[:safe_w]}")
+            elif status_line:
+                frame_buf.append(f"\033[{rows};1H{status_line[:safe_w]}")
+
             sys.stdout.write("".join(frame_buf))
             sys.stdout.flush()
-            # Debug line sits above status line
-            if debug_line and status_line:
-                try:
-                    scr.addstr(rows - 2, 0, debug_line[:safe_w])
-                except curses.error:
-                    pass
-            elif debug_line:
-                try:
-                    scr.addstr(rows - 1, 0, debug_line[:safe_w])
-                except curses.error:
-                    pass
-            if status_line:
-                try:
-                    scr.addstr(rows - 1, 0, status_line[:safe_w])
-                except curses.error:
-                    pass
-            scr.refresh()
         else:
             # Fallback: just print (no curses) — use string static path
             if self.static > 0.0 and _small is not None:
