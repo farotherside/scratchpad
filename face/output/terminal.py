@@ -290,30 +290,72 @@ class AalibRenderer:
         return result
 
 
+# ---------------------------------------------------------------------------
+# Static-shader brightness tiers.
+# Face pixels are bucketed into three luminance bands and rendered with
+# the matching ANSI white level, using a random character from the static
+# pool weighted toward denser chars for brighter pixels.
+# ---------------------------------------------------------------------------
+
+# Pool slices by luminance tier (indices into _NOISE_POOL)
+# Dark face pixels  → sparse chars (spaces / dots — first ~20 entries)
+# Mid face pixels   → mid-weight chars
+# Bright face pixels → full pool (includes dense alphanumerics)
+_FACE_DARK_MAX   = 20   # index ceiling for dark tier
+_FACE_MID_MAX    = 36   # index ceiling for mid tier
+# bright tier uses the full pool
+
+_FACE_DARK_THRESH  = 0.35
+_FACE_BRIGHT_THRESH = 0.65
+
+
 class FallbackRenderer:
-    """Renders using a pure-Python ASCII ramp — no dependencies."""
+    """Renders using the static character pool for both face and background.
+
+    Face pixels are shaded with dim/normal/bright ANSI white selected by
+    luminance; a random character is drawn from a luminance-weighted slice
+    of _NOISE_POOL so darker face regions use sparser chars and brighter
+    regions use denser ones.  Background pixels are left as spaces and
+    filled in by the StaticLayer overlay in TerminalDisplay.show().
+    """
 
     def __init__(self, ramp: str = _RAMP_70):
-        self._ramp = ramp
+        self._ramp = ramp   # kept for framebuf_to_str compat; unused here
         self._rng = np.random.default_rng()
 
-    def render(self, framebuf: np.ndarray, cols: int, rows: int) -> str:
-        """Downscale framebuf to (rows, cols) and map luminance → chars."""
+    def render(self, framebuf: np.ndarray, cols: int, rows: int,
+               bg_threshold: float = 0.20) -> str:
+        """Downscale framebuf to (rows, cols) and render face pixels as
+        ANSI-coloured static characters."""
         h, w = framebuf.shape
+        rng = self._rng
+        pool = _NOISE_POOL
+        pool_len = len(pool)
 
-        # Bilinear downscale via numpy slicing (fast approximation)
         row_idx = np.linspace(0, h - 1, rows).astype(int)
         col_idx = np.linspace(0, w - 1, cols).astype(int)
         small = framebuf[np.ix_(row_idx, col_idx)]  # (rows, cols)
 
-        # Terminal characters are taller than wide; compensate by sampling
-        # every other row (aspect correction factor ~0.5)
         lines = []
-        ramp = self._ramp
-        ramp_len = len(ramp) - 1
         for row in small:
-            chars = "".join(ramp[int(v * ramp_len)] for v in row)
-            lines.append(chars)
+            parts = []
+            for lum in row:
+                if lum <= bg_threshold:
+                    # Background — leave as space; StaticLayer fills this in
+                    parts.append(" ")
+                elif lum < _FACE_DARK_THRESH:
+                    # Dark face region — dim white, sparse chars
+                    ch = pool[int(rng.integers(0, _FACE_DARK_MAX))]
+                    parts.append(f"{_ANSI_DIM}{ch}{_ANSI_RESET}")
+                elif lum < _FACE_BRIGHT_THRESH:
+                    # Mid face region — normal white, mid-weight chars
+                    ch = pool[int(rng.integers(0, _FACE_MID_MAX))]
+                    parts.append(f"{_ANSI_NORMAL}{ch}{_ANSI_RESET}")
+                else:
+                    # Bright face region — bright white, full pool
+                    ch = pool[int(rng.integers(0, pool_len))]
+                    parts.append(f"{_ANSI_BRIGHT}{ch}{_ANSI_RESET}")
+            lines.append("".join(parts))
 
         return "\n".join(lines)
 
@@ -486,29 +528,26 @@ class TerminalDisplay:
                 sl_chars = None
                 sl_ansi  = None
 
+            # Face lines contain embedded ANSI escapes (static shader);
+            # curses addnstr would corrupt them.  Write all rows via
+            # sys.stdout using absolute cursor positioning, then let
+            # curses handle the overlay lines (debug / status) normally.
+            frame_buf = []
             for i, line in enumerate(lines[:render_rows]):
-                # Write face art first
-                try:
-                    scr.addnstr(i, 0, line.ljust(safe_w)[:safe_w], safe_w)
-                except curses.error:
-                    pass
-                # Then overwrite background cells with noise via raw ANSI.
-                # sys.stdout is used directly so that \033[1;37m (bright white)
-                # is honoured — curses A_BOLD does not produce bright luminance
-                # on modern terminals.
+                # Position cursor at start of row, write face line
+                frame_buf.append(f"\033[{i + 1};1H{line}")
+
+                # Overwrite background cells with static noise
                 if sl_chars and i < len(sl_chars):
                     crow = sl_chars[i]
                     arow = sl_ansi[i]
-                    ansi_writes = []
                     for x, (ch, ansi) in enumerate(zip(crow, arow)):
                         if ch is not None and x < safe_w:
-                            # CSI cursor position is 1-based: row i+1, col x+1
-                            ansi_writes.append(
+                            frame_buf.append(
                                 f"\033[{i + 1};{x + 1}H{ansi}{ch}{_ANSI_RESET}"
                             )
-                    if ansi_writes:
-                        sys.stdout.write("".join(ansi_writes))
-                        sys.stdout.flush()
+            sys.stdout.write("".join(frame_buf))
+            sys.stdout.flush()
             # Debug line sits above status line
             if debug_line and status_line:
                 try:
