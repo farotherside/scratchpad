@@ -71,11 +71,19 @@ class IdleMotion:
         self._phases = {k: random.uniform(0, math.tau) for k in
                         ("y1", "y2", "p1", "p2", "r1")}
 
+    # Slow Y-axis oscillation: ±20° (0.349 rad), one full sweep ~16s
+    _TURN_AMP    = math.radians(20.0)
+    _TURN_PERIOD = 16.0   # seconds per full left→right→left cycle
+
     def get(self, now: float) -> tuple[float, float, float]:
         """Returns (idle_yaw, idle_pitch, idle_roll) in radians."""
         p = self._phases
-        yaw   = (0.015 * math.sin(now * 0.11 + p["y1"]) +
-                 0.008 * math.sin(now * 0.31 + p["y2"]))
+        # Continuous slow head turn ±20° on Y axis
+        turn_yaw = self._TURN_AMP * math.sin(
+            (math.tau / self._TURN_PERIOD) * now + p["y1"]
+        )
+        # Subtle micro-motion layered on top
+        yaw   = turn_yaw + 0.008 * math.sin(now * 0.31 + p["y2"])
         pitch = (0.010 * math.sin(now * 0.13 + p["p1"]) +
                  0.005 * math.sin(now * 0.27 + p["p2"]))
         roll  =  0.006 * math.sin(now * 0.09 + p["r1"])
