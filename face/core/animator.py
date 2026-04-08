@@ -63,13 +63,25 @@ def _interp_keyframes(ka: Keyframe, kb: Keyframe, now: float) -> dict:
 # ---------------------------------------------------------------------------
 # Idle animation — slow Perlin-ish noise via summed sines
 # ---------------------------------------------------------------------------
+
+# Emotion cycle order for idle mode
+_IDLE_EMOTIONS = ["neutral", "happy", "neutral", "surprised", "neutral",
+                  "angry",   "neutral", "sad"]
+_EMOTION_HOLD    = 6.0   # seconds to hold each emotion at peak
+_EMOTION_FADE    = 3.0   # seconds to blend between emotions
+_EMOTION_STEP    = _EMOTION_HOLD + _EMOTION_FADE
+_EMOTION_CYCLE   = _EMOTION_STEP * len(_IDLE_EMOTIONS)
+
+
 class IdleMotion:
-    """Generates gentle continuous head movement and breathing."""
+    """Generates gentle continuous head movement, eye/mouth oscillation,
+    and slow emotion cycling."""
 
     def __init__(self):
         # Random phase offsets so each instance is unique
         self._phases = {k: random.uniform(0, math.tau) for k in
                         ("y1", "y2", "p1", "p2", "r1")}
+        self._start = None   # set on first get() call
 
     # Slow Y-axis oscillation: ±20° (0.349 rad), one full sweep ~16s
     _TURN_AMP    = math.radians(20.0)
@@ -77,6 +89,8 @@ class IdleMotion:
 
     def get(self, now: float) -> tuple[float, float, float]:
         """Returns (idle_yaw, idle_pitch, idle_roll) in radians."""
+        if self._start is None:
+            self._start = now
         p = self._phases
         # Continuous slow head turn ±20° on Y axis
         turn_yaw = self._TURN_AMP * math.sin(
@@ -88,6 +102,44 @@ class IdleMotion:
                  0.005 * math.sin(now * 0.27 + p["p2"]))
         roll  =  0.006 * math.sin(now * 0.09 + p["r1"])
         return yaw, pitch, roll
+
+    def get_emotion(self, now: float) -> tuple[str, str, float]:
+        """Returns (emotion_a, emotion_b, blend) for the current moment."""
+        if self._start is None:
+            return ("neutral", "neutral", 0.0)
+        elapsed = now - self._start
+        pos = elapsed % _EMOTION_CYCLE           # position within one cycle
+        step_idx = int(pos / _EMOTION_STEP) % len(_IDLE_EMOTIONS)
+        next_idx = (step_idx + 1) % len(_IDLE_EMOTIONS)
+        step_pos = pos - step_idx * _EMOTION_STEP
+
+        em_a = _IDLE_EMOTIONS[step_idx]
+        em_b = _IDLE_EMOTIONS[next_idx]
+
+        if step_pos < _EMOTION_HOLD:
+            # Holding current emotion
+            return (em_a, em_a, 0.0)
+        else:
+            # Fading to next
+            t = (step_pos - _EMOTION_HOLD) / _EMOTION_FADE
+            t = t * t * (3 - 2 * t)   # smoothstep
+            return (em_a, em_b, t)
+
+    def get_eye_mouth(self, now: float) -> tuple[float, float]:
+        """Returns (eye_close, mouth_open) oscillation weights [0, 1].
+
+        Eyes slowly close and reopen on a ~12s cycle.
+        Mouth gently opens and closes on a ~9s offset cycle.
+        """
+        # Eyes: slow close/open — remap sin to [0, 1], scale to max 0.7
+        eye_close = 0.35 * (1.0 - math.cos(
+            (math.tau / 12.0) * now
+        ))
+        # Mouth: gentle open/close on slightly different period
+        mouth_open = 0.25 * max(0.0, math.sin(
+            (math.tau / 9.0) * now + math.pi * 0.3
+        ))
+        return eye_close, mouth_open
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +277,24 @@ class Animator:
             if len(past_indices) > 1:
                 self._keyframes = kfs[past_indices[-1]:]
 
-        # Apply idle motion
+        # Apply idle motion (head pose)
         iy, ip, ir = self._idle.get(now)
         params.idle_yaw   = iy
         params.idle_pitch = ip
         params.idle_roll  = ir
+
+        # Apply idle emotion cycling (overridden by lipsync keyframes when active)
+        if prev_kf is None and next_kf is None:
+            em_a, em_b, em_blend = self._idle.get_emotion(now)
+            params.emotion_a     = em_a
+            params.emotion_b     = em_b
+            params.emotion_blend = em_blend
+
+            # Idle eye/mouth oscillation
+            eye_close, mouth_open_idle = self._idle.get_eye_mouth(now)
+            # Blend into existing morph weights via eye_squint and jaw_drop
+            params._idle_eye_close  = eye_close
+            params._idle_mouth_open = mouth_open_idle
 
         # Apply blink
         params.blink = self._blinker.get_weight(now)

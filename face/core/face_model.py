@@ -156,11 +156,21 @@ class FaceParams:
     idle_pitch: float = 0.0
     idle_roll: float = 0.0
 
+    # --- Idle eye/mouth oscillation (filled by animator in idle mode) ---
+    _idle_eye_close:  float = 0.0
+    _idle_mouth_open: float = 0.0
+
     def get_morph(self, key: str) -> float:
-        """Blend emotion morph targets + return final weight for a given key."""
+        """Blend emotion morph targets + idle oscillation weights."""
         a = EMOTION_SHAPES[self.emotion_a].get(key, 0.0)
         b = EMOTION_SHAPES[self.emotion_b].get(key, 0.0)
-        return a + (b - a) * self.emotion_blend
+        base = a + (b - a) * self.emotion_blend
+        # Layer idle oscillations on top
+        if key == "eye_squint":
+            base = min(1.0, base + self._idle_eye_close)
+        elif key == "jaw_drop":
+            base = min(1.0, base + self._idle_mouth_open)
+        return base
 
     def get_viseme_shape(self) -> tuple[float, float, float, float, float, float]:
         """Interpolate between rest (0) and target viseme shape."""
