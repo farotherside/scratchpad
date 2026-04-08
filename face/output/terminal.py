@@ -258,39 +258,6 @@ def _apply_static_to_string(lines: list[str], small: np.ndarray,
 # ---------------------------------------------------------------------------
 # Renderer classes
 # ---------------------------------------------------------------------------
-
-class AalibRenderer:
-    """Renders using the aalib library (requires both aalib and Pillow)."""
-
-    def __init__(self):
-        self._aa = _try_import_aalib()
-        if self._aa is None:
-            raise ImportError("aalib not available")
-        try:
-            from PIL import Image  # noqa: F401 — validate at init time
-            self._Image = Image
-        except ImportError:
-            raise ImportError("Pillow (PIL) not available — needed by aalib backend")
-        self._rng = np.random.default_rng()
-
-    def render(self, framebuf: np.ndarray, cols: int, rows: int) -> str:
-        """Convert float32 (H, W) framebuf → ASCII string via aalib."""
-        aa = self._aa
-        Image = self._Image
-        u8 = (np.clip(framebuf, 0, 1) * 255).astype(np.uint8)
-        screen = aa.AsciiScreen(width=cols, height=rows)
-        vw, vh = screen.virtual_size
-        img = Image.fromarray(u8, mode="L").resize((vw, vh), Image.LANCZOS)
-        screen.put_image((0, 0), img)
-        result = screen.render()
-        # render() returns bytes on some aalib versions
-        if isinstance(result, bytes):
-            result = result.decode("ascii", errors="replace")
-
-        return result
-
-
-# ---------------------------------------------------------------------------
 # Static-shader brightness tiers.
 # Face pixels are bucketed into three luminance bands and rendered with
 # the matching ANSI white level, using a random character from the static
@@ -369,6 +336,20 @@ class FallbackRenderer:
             lines.append("".join(parts))
 
         return "\n".join(lines)
+
+
+class AalibRenderer:
+    """Shim: formerly used aalib for character mapping; now delegates to
+    FallbackRenderer so the static shader applies uniformly.
+    Kept so TerminalDisplay backend-selection logic still works."""
+
+    def __init__(self):
+        if _try_import_aalib() is None:
+            raise ImportError("aalib not available")
+        self._fallback = FallbackRenderer()
+
+    def render(self, framebuf: np.ndarray, cols: int, rows: int) -> str:
+        return self._fallback.render(framebuf, cols, rows)
 
 
 # ---------------------------------------------------------------------------
