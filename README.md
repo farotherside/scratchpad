@@ -31,12 +31,15 @@ synchronized to ElevenLabs TTS audio output.
 - 9 viseme groups mapped from ElevenLabs per-character timestamps for lipsync
 - 5 emotion blend shapes (neutral, happy, sad, surprised, angry)
 - Idle head motion, spontaneous blinking, smooth keyframe interpolation
+- BB-style TV static layer: symmetric character set, randomised curses attrs
+- Intro sequence: face emerges from static across a three-phase dissolve
 - Terminal resize support via `SIGWINCH` — resolution updates live
 - aalib backend with curses fallback for ASCII rendering
-- `--no-audio` mode requires no API key
+- `--demo` mode requires no API key
 
 ```bash
 cd face && pip install -r requirements.txt
+python main.py --demo                          # built-in demo, no API key
 python main.py --idle                          # idle animation
 python main.py --no-audio "hello there"        # animate, no TTS
 ELEVENLABS_API_KEY=sk_... python main.py "Hi" # full TTS + lipsync
