@@ -1,7 +1,8 @@
 # face
 
 A terminal-based animated 3D talking face, synchronized to ElevenLabs TTS audio.
-Renders entirely in ASCII art using a numpy-vectorised SDF ray marcher — no meshes, no assets.
+Renders a real OBJ mesh (`teen_head.obj`) as ASCII art using a numpy-vectorised
+triangle rasteriser with z-buffering and Phong shading — no external 3D libraries.
 
 ## Demo
 
@@ -17,8 +18,11 @@ ELEVENLABS_API_KEY=sk_... python main.py "Hi!" # full TTS + lipsync
 
 ```
 face/
+├── assets/
+│   └── teen_head.obj    # Source mesh (~16 K triangles, decimated at load time)
 ├── core/
-│   ├── renderer.py      # SDF ray marcher → numpy float32 framebuffer
+│   ├── mesh.py          # OBJ loader, mesh decimation, blend-shape deformer
+│   ├── renderer.py      # Triangle rasteriser → numpy float32 framebuffer
 │   ├── face_model.py    # Blend-shape parameters (emotions, visemes)
 │   └── animator.py      # Keyframe interpolation, expression FSM
 ├── output/
@@ -30,33 +34,42 @@ face/
 
 ## How it works
 
-1. **3D face** — A ray marcher evaluates Signed Distance Functions (SDF) for each
-   face primitive (head, eyes, nose, lips, brows, ears) per pixel. Blend-shape
-   weights smoothly morph shapes for expression and speech in real time.
+1. **Mesh** — `teen_head.obj` is loaded once at startup. The raw ~16 K triangle
+   mesh is grid-decimated to ~1 K triangles for real-time performance. Vertices
+   are centred and normalised so the head spans roughly ±1 in all axes.
 
-2. **Renderer** — Pure numpy; vectorised SDF evaluation + per-material Phong shading.
+2. **Blend shapes** — Per-vertex Gaussian influence fields drive facial deformation:
+   jaw drop, mouth open/wide, smile, frown, brow raise/furrow, cheek raise,
+   eye wide/squint. Weights are interpolated each frame from the animator.
+
+3. **Renderer** — Pure numpy pipeline per frame:
+   - Apply blend-shape deformation to vertex positions
+   - Apply head-pose rotation (yaw / pitch / roll)
+   - Perspective-project vertices to screen space with character-aspect correction
+   - Backface-cull and screen-bbox filter (vectorised)
+   - Per-triangle rasterise with barycentric interpolation + z-buffer
+   - Phong shade hit pixels (two lights + ambient + specular)
    Output is a float32 luminance framebuffer scaled to terminal dimensions.
 
-3. **Terminal output** — Uses `aalib` (if installed) or falls back to a curses
+4. **Terminal output** — Uses `aalib` (if installed) or falls back to a curses
    brightness-to-ASCII ramp. `SIGWINCH` handler redraws at new terminal size live.
 
-4. **Static layer** — BB-style TV static drawn in the background. Each frame,
-   background pixels are filled with characters drawn from a restricted pool of
-   rotationally/reflectively symmetric alphanumerics (`0 1 8 A H I M O T U V W X Y`)
-   plus non-alphanumeric symbols (`| - + = * @ # % : .`), with randomised
-   curses bold/normal/dim attributes for a flickery CRT look. Intensity is tunable
-   via `--static`.
+5. **Static layer** — BB-style TV static drawn in the background. Characters are
+   drawn from a restricted pool of rotationally/reflectively symmetric
+   alphanumerics (`0 1 8 A H I M O T U V W X Y`) plus non-alphanumeric symbols
+   (`| - + = * @ # % : .`), with randomised curses bold/normal/dim attributes
+   for a flickery CRT look. Intensity tunable via `--static`.
 
-5. **Audio & lipsync** — ElevenLabs `/v1/text-to-speech/{voice_id}/with-timestamps`
+6. **Audio & lipsync** — ElevenLabs `/v1/text-to-speech/{voice_id}/with-timestamps`
    returns per-character timing. Characters map to 9 standard viseme groups,
    producing a timeline of mouth blend-shape keyframes. Audio plays via
    `sounddevice` while the animator follows the timeline in a separate thread.
 
-6. **Emotions** — Five emotion blend weights (neutral, happy, sad, surprised, angry)
+7. **Emotions** — Five emotion blend weights (neutral, happy, sad, surprised, angry)
    can be set via `--emotion` or driven programmatically.
 
-7. **Intro sequence** — On startup the face emerges from static: the renderer fades
-   in through a three-phase transition (pure static → static dissolve → solid face).
+8. **Intro sequence** — On startup the face emerges from static across a
+   three-phase dissolve (pure static → static dissolve → solid face).
 
 ## Requirements
 
