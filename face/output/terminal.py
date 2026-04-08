@@ -314,6 +314,10 @@ class FallbackRenderer:
         col_idx = np.linspace(0, w - 1, cols).astype(int)
         small = framebuf[np.ix_(row_idx, col_idx)]  # (rows, cols)
 
+        # Reduce face luminance by 50% so the static shader tiers
+        # sit in a more atmospheric, dimmer range.
+        small = small * 0.5
+
         lines = []
         for row in small:
             parts = []
