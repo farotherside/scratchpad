@@ -22,12 +22,14 @@ from core.mesh import MeshFace
 # Lazy singleton mesh (loaded once on first render call)
 # ---------------------------------------------------------------------------
 _MESH: MeshFace | None = None
+_MESH_MODEL: str | None = None
 
 
-def _get_mesh() -> MeshFace:
-    global _MESH
-    if _MESH is None:
-        _MESH = MeshFace()
+def _get_mesh(model: str | None = None) -> MeshFace:
+    global _MESH, _MESH_MODEL
+    if _MESH is None or model != _MESH_MODEL:
+        _MESH = MeshFace(model=model)
+        _MESH_MODEL = model
     return _MESH
 
 
@@ -241,13 +243,14 @@ def _rasterise(
 # ---------------------------------------------------------------------------
 
 def render(width: int, height: int, params: FaceParams,
-           return_depth: bool = False):
+           return_depth: bool = False, model: str | None = None):
     """
     Returns float32 luminance framebuffer (height, width) in [0, 1].
     If *return_depth* is True, returns (luminance, zbuf) where zbuf holds
     per-pixel world-Z values (-inf for background, higher = closer to camera).
+    *model* selects the OBJ mesh (default "generic").
     """
-    mesh = _get_mesh()
+    mesh = _get_mesh(model)
     verts, faces, vert_normals, vert_mat = mesh.get_deformed(params)
 
     # Head-pose rotation (same convention as old renderer)

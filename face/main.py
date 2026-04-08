@@ -97,6 +97,11 @@ def parse_args():
         "--render-height", type=int, default=None,
         help="Override render framebuffer height (default: terminal height * 4)"
     )
+    parser.add_argument(
+        "--model", default="generic",
+        help="3D face model to use (default: generic). "
+             "Available: generic, teen_head"
+    )
     return parser.parse_args()
 
 
@@ -380,10 +385,10 @@ def run(args):
                 emerge_ease = _smoothstep(
                     (t_intro - _FADE_IN_DUR - _STATIC_HOLD) / _EMERGE_DUR)
                 params.head_pitch += 0.45 * (1.0 - emerge_ease)
-                face_lum, face_depth = render(rw, rh, params, return_depth=True)
+                face_lum, face_depth = render(rw, rh, params, return_depth=True, model=args.model)
                 buf = _zclip_face(face_lum, face_depth, emerge_ease)
             else:
-                buf = render(rw, rh, params)
+                buf = render(rw, rh, params, model=args.model)
 
             # Show — status on last line, debug overlay on second-to-last
             debug = td.debug_line

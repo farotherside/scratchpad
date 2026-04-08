@@ -1,15 +1,19 @@
 """
-mesh.py — OBJ loader and blend-shape vertex deformer for the teen_head model.
+mesh.py — OBJ loader and blend-shape vertex deformer for 3D face models.
+
+Supported models (selected via --model flag):
+  generic     generic_face.obj  (default)
+  teen_head   teen_head.obj
 
 Coordinate system (post-normalisation):
   +X  right,  +Y  up,  +Z  toward camera
-  Head spans roughly  X ∈ [-0.71, 0.71]
-                      Y ∈ [-0.92, 1.00]
-                      Z ∈ [-0.77, 0.71]
-  Nose tip:  Y ≈ -0.14,  Z ≈  0.71
-  Mouth:     Y ≈ -0.45 … -0.05,  Z > 0.51 (centre-line)
-  Brows:     Y ≈  0.21 …  0.62,  Z ≈  0.53
-  Jaw:       Y ≈ -0.74 … -0.35,  Z  0.20 … 0.58
+  Head spans roughly  X ∈ [-0.7, 0.7]
+                      Y ∈ [-1.0, 1.0]
+                      Z ∈ [-0.7, 0.7]
+  Nose tip:  Z ≈  0.7
+  Mouth:     Y ≈ -0.2 … -0.1,  Z > 0.5 (centre-line)
+  Brows:     Y ≈  0.3 …  0.5,  Z ≈  0.5
+  Jaw:       Y ≈ -0.6 … -0.3,  Z  0.2 … 0.5
 """
 
 from __future__ import annotations
@@ -17,6 +21,12 @@ import numpy as np
 from pathlib import Path
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
+
+# Registry of available models: name → OBJ filename
+MODEL_REGISTRY: dict[str, str] = {
+    "generic":   "generic_face.obj",
+    "teen_head": "teen_head.obj",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +150,16 @@ class MeshFace:
     # grid=10 → ~1 000 triangles (vs 16 K raw) — fast enough for 15 FPS.
     DECIMATE_GRID = 10
 
-    def __init__(self, obj_path: str | None = None):
-        path = obj_path or str(ASSETS_DIR / "teen_head.obj")
+    def __init__(self, obj_path: str | None = None, model: str | None = None):
+        if obj_path is None:
+            name = model or "generic"
+            if name not in MODEL_REGISTRY:
+                raise ValueError(
+                    f"Unknown model {name!r}. "
+                    f"Available: {', '.join(sorted(MODEL_REGISTRY))}"
+                )
+            obj_path = str(ASSETS_DIR / MODEL_REGISTRY[name])
+        path = obj_path
         verts, faces, vert_normals = _load_obj(path)
 
         # Centre on vertex centroid, scale so the largest half-extent = 1
