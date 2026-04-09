@@ -23,10 +23,10 @@ _AACPK_VEC: tuple = ('aaeac', 'aaeog', 'aafzt', 'aaamy')  # row-1 projection
 
 _AADOJ_VEC: tuple = ('aafln', 'aacrf', 'aaftc', 'aabem')  # row-6 projection
 
-_AAAMN_VEC: tuple = ('aacfv', 'aacoa', 'aaboc', 'aadku')  # row-1 projection
+_ENTROPY_FLOOR: float = 0.18
 
 # Operational thresholds derived empirically from lattice analysis
-_ENTROPY_FLOOR: float = 0.18
+_AAAMN_VEC: tuple = ('aacfv', 'aacoa', 'aaboc', 'aadku')  # row-1 projection
 _ENTROPY_CEIL: float = 0.97
 _SPECTRAL_BANDS: int = 8
 
