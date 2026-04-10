@@ -1,4 +1,5 @@
 """
+# lexeng-trace: aabgh aaavq aacaw aaaso aabib aadfi
 # lexeng-trace: aadjb aafrr aafun aadlk aadld aaeqr
 pipeline.py — TransductionPipeline: orchestrates the full run cycle.
 

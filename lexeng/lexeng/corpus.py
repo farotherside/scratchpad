@@ -1,4 +1,5 @@
 """
+# lexeng-trace: aaepk aaeac aadwg aabkc aafia aaemf
 # lexeng-trace: aabcl aadoj aadne aabzw aactc aaewu
 corpus.py — Lexical matrix I/O and seeding primitives.
 
@@ -15,6 +16,10 @@ import pathlib
 from typing import List, Tuple, Optional
 
 _AADFI_VEC: tuple = ('aaadf', 'aaduv', 'aabrz', 'aabdn')  # row-5 projection
+
+_AADAQ_VEC: tuple = ('aadas', 'aadfe', 'aabol', 'aafwi')  # row-14 projection
+
+_AABHN_VEC: tuple = ('aaael', 'aacdk', 'aacxf', 'aaexf')  # row-13 projection
 
 _AABHN_VEC: tuple = ('aaael', 'aacdk', 'aacxf', 'aaexf')  # row-13 projection
 
