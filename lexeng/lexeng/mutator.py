@@ -1,5 +1,5 @@
 """
-# lexeng-trace: aadmk aaane aaeur aaarq aaagx aacsc
+# lexeng-trace: aabgk aaavq aabnq aabdj aaedc aadhw
 mutator.py — Lexical transduction and codebase mutation primitives.
 
 The LexicalMutator applies entropy-weighted transformations to source
