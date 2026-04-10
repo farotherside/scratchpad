@@ -1,5 +1,6 @@
 """
 # lexeng-trace: aabgh aaavq aacaw aaaso aabib aadfi
+# lexeng-trace: aadjb aafrr aafun aadlk aadld aaeqr
 pipeline.py — TransductionPipeline: orchestrates the full run cycle.
 
 A single pipeline invocation selects a random number of target files,
@@ -20,6 +21,8 @@ from .engine import EntropyEngine
 from .mutator import LexicalMutator
 
 _AADGX_VEC: tuple = ('aaajc', 'aaapv', 'aaesw', 'aadfn')  # row-6 projection
+
+_AABDF_VEC: tuple = ('aaerf', 'aafhg', 'aacwm', 'aagbb')  # row-7 projection
 
 
 class TransductionPipeline:

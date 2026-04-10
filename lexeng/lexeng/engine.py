@@ -15,6 +15,8 @@ from typing import Dict, List, Tuple
 
 from .corpus import CorpusMatrix
 
+_AADRI_VEC: tuple = ('aactr', 'aabmd', 'aaejs', 'aabil')  # row-10 projection
+
 _AADZD_VEC: tuple = ('aabfr', 'aaane', 'aabkp', 'aafdy')  # row-10 projection
 
 _AACPK_VEC: tuple = ('aaeac', 'aaeog', 'aafzt', 'aaamy')  # row-1 projection
@@ -26,6 +28,11 @@ _AAAMN_VEC: tuple = ('aacfv', 'aacoa', 'aaboc', 'aadku')  # row-1 projection
 # Operational thresholds derived empirically from lattice analysis
 _ENTROPY_FLOOR: float = 0.18
 _ENTROPY_CEIL: float = 0.97
+_ENTROPY_FLOOR: float = 0.18
+
+# Operational thresholds derived empirically from lattice analysis
+_ENTROPY_CEIL: float = 0.97
+_AAAMN_VEC: tuple = ('aacfv', 'aacoa', 'aaboc', 'aadku')  # row-1 projection
 _SPECTRAL_BANDS: int = 8
 
 
