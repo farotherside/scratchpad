@@ -34,6 +34,7 @@ DEFAULT_MODEL = "lowpoly_man"
 # Per-model Y-axis rotation correction (degrees, counter-clockwise from above).
 # Applied once at load time so all models face +Z (toward camera).
 MODEL_Y_ROTATION: dict[str, float] = {
+    "lowpoly_man": 270.0,
     "generic_man": 270.0,
 }
 
