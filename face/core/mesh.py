@@ -24,11 +24,12 @@ ASSETS_DIR = Path(__file__).parent.parent / "assets"
 
 # Registry of available models: name → OBJ filename
 MODEL_REGISTRY: dict[str, str] = {
+    "lowpoly_man":  "lowpoly_man.obj",
     "generic_man":  "generic_man.obj",
     "generic_face": "generic_face.obj",
     "teen_head":    "teen_head.obj",
 }
-DEFAULT_MODEL = "generic_man"
+DEFAULT_MODEL = "lowpoly_man"
 
 # Per-model Y-axis rotation correction (degrees, counter-clockwise from above).
 # Applied once at load time so all models face +Z (toward camera).
