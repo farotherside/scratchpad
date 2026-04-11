@@ -20,6 +20,7 @@ Options:
     --no-table              Suppress terminal table output
     -j, --jobs <n>          Parallel probe jobs (default: CPU count)
     -q, --quiet             Suppress progress output
+    --html <file>           Export results as a self-contained HTML report
     -h, --help              Show this help
 """
 
@@ -618,6 +619,346 @@ def export_csv(all_files: List["VideoFile"], path: str):
     print(GREEN(f"✓ CSV exported: {path}"))
 
 
+# ---------------------------------------------------------------------------
+# HTML export
+# ---------------------------------------------------------------------------
+GRADE_CSS = {
+    "excellent": "#22c55e",   # green
+    "good":      "#86efac",   # light green
+    "fair":      "#facc15",   # yellow
+    "poor":      "#f97316",   # orange
+    "terrible":  "#ef4444",   # red
+    "?":         "#6b7280",   # grey
+}
+
+def h(text: str) -> str:
+    """HTML-escape a string."""
+    return (str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
+               path: str, sort_by: str, descending: bool,
+               directory: str, total_scanned: int):
+    from datetime import datetime
+
+    total_size   = sum(vf.size_bytes for vf in good)
+    corrupt_size = sum(vf.size_bytes for vf in corrupt)
+
+    grade_counts: Dict[str, int] = {}
+    for vf in good:
+        grade_counts[vf.grade] = grade_counts.get(vf.grade, 0) + 1
+
+    scoreable = [vf for vf in good if vf.norm_efficiency < float("inf")]
+    avg_eff = (sum(vf.norm_efficiency for vf in scoreable) / len(scoreable)
+               if scoreable else None)
+    best  = min(scoreable, key=lambda v: v.norm_efficiency) if scoreable else None
+    worst = max(scoreable, key=lambda v: v.norm_efficiency) if scoreable else None
+
+    codecs: Dict[str, int] = {}
+    for vf in good:
+        codecs[vf.codec] = codecs.get(vf.codec, 0) + 1
+    top_codecs = sorted(codecs.items(), key=lambda x: -x[1])
+
+    grade_order = ["excellent", "good", "fair", "poor", "terrible", "?"]
+
+    def grade_badge(grade: str) -> str:
+        colour = GRADE_CSS.get(grade, "#6b7280")
+        return (f'<span class="badge" '
+                f'style="background:{colour};color:'
+                f'{'#111' if grade in ('excellent','good','fair') else '#fff'}"'
+                f'>{h(grade)}</span>')
+
+    def norm_eff_cell(vf: "VideoFile") -> str:
+        colour = GRADE_CSS.get(vf.grade, "#6b7280")
+        return f'<span style="color:{colour};font-weight:600">{h(fmt_efficiency(vf.norm_efficiency))}</span>'
+
+    # Build rows
+    rows_html = []
+    for vf in good:
+        d = file_to_dict(vf)
+        rows_html.append(f"""
+        <tr class="grade-{h(vf.grade)}">
+          <td class="mono">{norm_eff_cell(vf)}</td>
+          <td class="mono dim">{h(d['raw_efficiency'])}</td>
+          <td><code>{h(d['codec'])}</code></td>
+          <td class="dim">{h(d['codec_factor'])}x</td>
+          <td>{grade_badge(vf.grade)}</td>
+          <td class="dim">{h(d['percentile'])}%</td>
+          <td class="mono">{h(fmt_size(vf.size_bytes))}</td>
+          <td>{h(vf.resolution)}</td>
+          <td class="mono dim">{h(d['bitrate_fmt'])}</td>
+          <td class="dim">{h(vf.duration_hms)}</td>
+          <td class="filename" title="{h(str(vf.path))}">{h(vf.path.name)}</td>
+        </tr>""")
+
+    corrupt_rows = []
+    for vf in corrupt:
+        corrupt_rows.append(f"""
+        <tr class="corrupt-row">
+          <td colspan="3" class="filename" title="{h(str(vf.path))}">
+            <span class="corrupt-x">✗</span> {h(vf.path.name)}
+          </td>
+          <td colspan="4" class="dim">{h(vf.corrupt_reason)}</td>
+          <td colspan="4" class="dim">{h(fmt_size(vf.size_bytes))}</td>
+        </tr>""")
+
+    grade_pills = "".join(
+        f'<span class="pill" style="background:{GRADE_CSS.get(g,"#6b7280")}">{g}: {grade_counts.get(g,0)}</span>'
+        for g in grade_order if g in grade_counts
+    )
+
+    codec_pills = "".join(
+        f'<span class="pill pill-neutral">{h(k)}: {v}</span>'
+        for k, v in top_codecs
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>movie-scanner report</title>
+<style>
+  :root {{
+    --bg:      #0f1117;
+    --surface: #1a1d27;
+    --border:  #2a2d3a;
+    --text:    #e2e8f0;
+    --dim:     #64748b;
+    --accent:  #6366f1;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+    padding: 2rem;
+  }}
+  h1 {{ font-size: 1.4rem; font-weight: 700; margin-bottom: .25rem; color: #f1f5f9; }}
+  h2 {{ font-size: 1rem; font-weight: 600; margin: 1.5rem 0 .6rem; color: #cbd5e1; }}
+  .meta {{ color: var(--dim); font-size: .8rem; margin-bottom: 1.5rem; }}
+  .summary {{
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: .75rem;
+    margin-bottom: 1.5rem;
+  }}
+  .card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .75rem 1rem;
+  }}
+  .card .label {{ font-size: .7rem; text-transform: uppercase;
+                  letter-spacing: .05em; color: var(--dim); }}
+  .card .value {{ font-size: 1.1rem; font-weight: 700; margin-top: .2rem; }}
+  .pills {{ display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: 1.2rem; }}
+  .pill {{
+    padding: .2rem .55rem;
+    border-radius: 999px;
+    font-size: .72rem;
+    font-weight: 600;
+    color: #111;
+  }}
+  .pill-neutral {{ background: var(--border); color: var(--text); }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }}
+  thead th {{
+    background: var(--surface);
+    color: var(--dim);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: .68rem;
+    letter-spacing: .04em;
+    padding: .55rem .6rem;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    position: sticky;
+    top: 0;
+    cursor: pointer;
+    user-select: none;
+  }}
+  thead th:hover {{ color: var(--text); }}
+  thead th.sorted {{ color: var(--accent); }}
+  thead th.num, td.num {{ text-align: right; }}
+  tbody tr {{
+    border-bottom: 1px solid var(--border);
+    transition: background .1s;
+  }}
+  tbody tr:hover {{ background: var(--surface); }}
+  td {{
+    padding: .45rem .6rem;
+    vertical-align: middle;
+    white-space: nowrap;
+  }}
+  td.filename {{
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #cbd5e1;
+  }}
+  .mono {{ font-family: 'SF Mono', 'Fira Code', monospace; }}
+  .dim {{ color: var(--dim); }}
+  code {{
+    background: var(--border);
+    padding: .1rem .35rem;
+    border-radius: 4px;
+    font-size: .8rem;
+  }}
+  .badge {{
+    display: inline-block;
+    padding: .15rem .5rem;
+    border-radius: 999px;
+    font-size: .7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }}
+  .corrupt-row td {{ color: #ef4444; }}
+  .corrupt-row .dim {{ color: #f87171; }}
+  .corrupt-x {{ font-weight: 900; margin-right: .3rem; }}
+  .section-header {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .6rem 1rem;
+    margin-bottom: .5rem;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }}
+  .warn-icon {{ color: #f59e0b; font-size: 1rem; }}
+  input#search {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: .4rem .8rem;
+    font-size: .85rem;
+    outline: none;
+    width: 260px;
+    margin-bottom: .75rem;
+  }}
+  input#search:focus {{ border-color: var(--accent); }}
+  .toolbar {{ display: flex; align-items: center; gap: 1rem; margin-bottom: .5rem; }}
+  footer {{ margin-top: 2rem; color: var(--dim); font-size: .75rem; }}
+</style>
+</head>
+<body>
+<h1>⚙ movie-scanner report</h1>
+<div class="meta">
+  Directory: <code>{h(directory)}</code> &nbsp;·&nbsp;
+  Sorted by: <strong>{h(sort_by)}</strong> {'↓' if descending else '↑'} &nbsp;·&nbsp;
+  Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+</div>
+
+<div class="summary">
+  <div class="card"><div class="label">Files scanned</div><div class="value">{total_scanned}</div></div>
+  <div class="card"><div class="label">Valid</div><div class="value" style="color:#22c55e">{len(good)}</div></div>
+  <div class="card"><div class="label">Corrupt</div><div class="value" style="color:{'#ef4444' if corrupt else '#22c55e'}">{len(corrupt)}</div></div>
+  <div class="card"><div class="label">Total size</div><div class="value">{h(fmt_size(total_size + corrupt_size))}</div></div>
+  {'<div class="card"><div class="label">Avg norm-eff</div><div class="value mono">' + h(fmt_efficiency(avg_eff)) + '</div></div>' if avg_eff else ''}
+  {'<div class="card"><div class="label">Best encoded</div><div class="value" style="font-size:.8rem;color:#22c55e">' + h(best.path.name[:28]) + '</div></div>' if best else ''}
+  {'<div class="card"><div class="label">Worst encoded</div><div class="value" style="font-size:.8rem;color:#ef4444">' + h(worst.path.name[:28]) + '</div></div>' if worst else ''}
+</div>
+
+<h2>Grade breakdown</h2>
+<div class="pills">{grade_pills}</div>
+
+<h2>Codecs</h2>
+<div class="pills">{codec_pills}</div>
+
+<h2>Valid Files ({len(good)})</h2>
+<div class="toolbar">
+  <input id="search" type="text" placeholder="Filter by filename…" oninput="filterTable(this.value)">
+</div>
+<table id="main-table">
+  <thead>
+    <tr>
+      <th class="num sorted" onclick="sortTable(0)">NormEff ↕</th>
+      <th class="num" onclick="sortTable(1)">RawEff ↕</th>
+      <th onclick="sortTable(2)">Codec ↕</th>
+      <th class="num" onclick="sortTable(3)">Factor ↕</th>
+      <th onclick="sortTable(4)">Grade ↕</th>
+      <th class="num" onclick="sortTable(5)">Pctile ↕</th>
+      <th class="num" onclick="sortTable(6)">Size ↕</th>
+      <th onclick="sortTable(7)">Resolution ↕</th>
+      <th class="num" onclick="sortTable(8)">Bitrate ↕</th>
+      <th onclick="sortTable(9)">Duration ↕</th>
+      <th onclick="sortTable(10)">Filename ↕</th>
+    </tr>
+  </thead>
+  <tbody id="main-tbody">
+    {''.join(rows_html)}
+  </tbody>
+</table>
+
+{'<h2>⚠ Corrupt / Unreadable Files (' + str(len(corrupt)) + ')</h2><table><thead><tr><th colspan="3">Filename</th><th colspan="4">Reason</th><th colspan="4">Size</th></tr></thead><tbody>' + ''.join(corrupt_rows) + '</tbody></table>' if corrupt else ''}
+
+<footer>
+  movie-scanner &nbsp;·&nbsp; NormEff = codec-normalised bits/pixel (H.264 baseline, lower = better) &nbsp;·&nbsp;
+  Grades are percentile-based relative to this library.
+</footer>
+
+<script>
+  // Client-side sort
+  let sortCol = 0, sortAsc = true;
+  const numCols = new Set([0,1,3,5,6,8]);
+
+  function cellVal(row, col) {{
+    return row.cells[col]?.innerText.trim() ?? '';
+  }}
+
+  function sortTable(col) {{
+    if (sortCol === col) sortAsc = !sortAsc;
+    else {{ sortCol = col; sortAsc = true; }}
+
+    const tbody = document.getElementById('main-tbody');
+    const rows  = Array.from(tbody.rows);
+    rows.sort((a, b) => {{
+      let av = cellVal(a, col), bv = cellVal(b, col);
+      if (av === 'N/A') av = sortAsc ? '99999' : '-1';
+      if (bv === 'N/A') bv = sortAsc ? '99999' : '-1';
+      if (numCols.has(col)) {{
+        av = parseFloat(av.replace(/[^0-9.]/g, '')) || 0;
+        bv = parseFloat(bv.replace(/[^0-9.]/g, '')) || 0;
+        return sortAsc ? av - bv : bv - av;
+      }}
+      return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+    }});
+    rows.forEach(r => tbody.appendChild(r));
+
+    document.querySelectorAll('thead th').forEach((th, i) => {{
+      th.classList.toggle('sorted', i === col);
+    }});
+  }}
+
+  function filterTable(query) {{
+    const q = query.toLowerCase();
+    Array.from(document.getElementById('main-tbody').rows).forEach(row => {{
+      const name = cellVal(row, 10).toLowerCase();
+      row.style.display = name.includes(q) ? '' : 'none';
+    }});
+  }}
+</script>
+</body>
+</html>
+"""
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(GREEN(f"✓ HTML exported: {path}"))
+
+
 def export_txt(good: List["VideoFile"], corrupt: List["VideoFile"],
                path: str, sort_by: str, descending: bool):
     with open(path, "w", encoding="utf-8") as f:
@@ -764,6 +1105,7 @@ Codec factors (vs H.264 = 1.0):  AV1=2.5  HEVC=1.8  VP9=1.4  MPEG4=0.7  MPEG2=0.
                    help="Sort descending")
     p.add_argument("--csv", metavar="FILE", help="Export results to CSV")
     p.add_argument("--txt", metavar="FILE", help="Export results to plain text")
+    p.add_argument("--html", metavar="FILE", help="Export results as a self-contained HTML report")
     p.add_argument("--no-table", action="store_true",
                    help="Suppress terminal table")
     p.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4,
@@ -846,6 +1188,9 @@ def main():
         export_csv(good + corrupt, args.csv)
     if args.txt:
         export_txt(good, corrupt, args.txt, args.sort, args.desc)
+    if args.html:
+        export_html(good, corrupt, args.html, args.sort, args.desc,
+                    str(directory), len(files))
 
     sys.exit(2 if corrupt else 0)
 
