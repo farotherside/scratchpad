@@ -15,7 +15,7 @@ Zero third-party Python dependencies. Requires `ffmpeg`/`ffprobe`.
 ## Usage
 
 ```bash
-python3 mediascan.py [OPTIONS] <directory>
+python3 movie-scanner.py [OPTIONS] <directory>
 ```
 
 ### Options
@@ -36,16 +36,16 @@ python3 mediascan.py [OPTIONS] <directory>
 
 ```bash
 # Basic scan of a flat directory
-python3 mediascan.py /mnt/movies
+python3 movie-scanner.py /mnt/movies
 
 # Recursive scan with full exports
-python3 mediascan.py -r /mnt/movies --csv results.csv --txt report.txt
+python3 movie-scanner.py -r /mnt/movies --csv results.csv --txt report.txt
 
 # Deep corruption scan, sort largest first
-python3 mediascan.py -r /mnt/movies --deep --sort size --desc
+python3 movie-scanner.py -r /mnt/movies --deep --sort size --desc
 
 # Quiet, limited workers, CSV only
-python3 mediascan.py -r /mnt/movies -j 4 -q --csv out.csv
+python3 movie-scanner.py -r /mnt/movies -j 4 -q --csv out.csv
 ```
 
 ## Efficiency Metric

@@ -4,6 +4,27 @@ Experimental projects and research tools.
 
 ---
 
+## [movie-scanner](./movie-scanner) — Movie Library Audit Tool
+
+Scans a directory of video files to identify corruption and rank files by encoding efficiency (bits per pixel per second). Helps surface bloated or poorly encoded movies in a large library.
+
+**Key features:**
+- Dependency check with install hints (requires `ffmpeg`/`ffprobe`)
+- Parallel probing across all CPU cores
+- Detects corruption: unreadable files, missing video streams, zero duration
+- `--deep` mode decodes frames at 10/50/90% through each file for thorough corruption detection
+- Efficiency metric: bitrate ÷ pixels — colour-coded grades (excellent → terrible)
+- Sortable by efficiency, size, bitrate, resolution, codec, fps, duration
+- Terminal table output + optional CSV and plain-text export
+- Recursive scan opt-in (`-r`)
+
+```bash
+python3 movie-scanner.py /mnt/movies
+python3 movie-scanner.py -r /mnt/movies --deep --csv results.csv
+```
+
+---
+
 ## [tv-scanner](./tv-scanner) — TV Library Episode Checker
 
 Scans a local TV library directory and compares it against the [TVmaze](https://www.tvmaze.com/api) public API to identify missing or extra episodes. Outputs a per-show report in text, JSON, or CSV format.
