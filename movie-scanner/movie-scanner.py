@@ -244,6 +244,16 @@ def assign_grades(files: List["VideoFile"]):
             vf.grade = "?"
         return
 
+    # With only one file there's no meaningful distribution — skip grading
+    if len(scoreable) < 2:
+        for vf in scoreable:
+            vf.percentile = 50.0
+            vf.grade = "?"
+        for vf in inf_files:
+            vf.percentile = 100.0
+            vf.grade = "?"
+        return
+
     # Sort by norm_efficiency ascending (lower = better)
     ranked = sorted(scoreable, key=lambda v: v.norm_efficiency)
     n = len(ranked)
@@ -391,7 +401,7 @@ def deep_probe(vf: "VideoFile") -> "VideoFile":
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if "frame=" not in result.stderr and result.returncode != 0:
+            if result.returncode != 0:
                 vf.corrupt = True
                 vf.corrupt_reason = (
                     f"frame decode failed at {frac*100:.0f}% ({seek_s:.1f}s)"
@@ -499,8 +509,8 @@ def print_table(files: List["VideoFile"], sort_by: str, descending: bool):
     # Header
     headers = [col[0] for col in COLUMNS]
     header_cells = [
-        h.ljust(widths[i]) if COLUMNS[i][2] == "left" else h.rjust(widths[i])
-        for i, h in enumerate(headers)
+        hdr.ljust(widths[i]) if COLUMNS[i][2] == "left" else hdr.rjust(widths[i])
+        for i, hdr in enumerate(headers)
     ]
     separator = "─" * (sum(widths) + separators)
 
@@ -533,8 +543,6 @@ def print_table(files: List["VideoFile"], sort_by: str, descending: bool):
 
             # Apply colour
             if i == 0:
-                rendered = coloured_norm_eff(vf) if truncated == cell else coloured_norm_eff(vf)
-                # re-truncate the plain text, recolour
                 fn = GRADE_COLOUR.get(vf.grade, lambda t: t)
                 rendered = fn(truncated)
             elif i == 4:  # Grade
@@ -667,10 +675,10 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
 
     def grade_badge(grade: str) -> str:
         colour = GRADE_CSS.get(grade, "#6b7280")
+        text_colour = "#111" if grade in ("excellent", "good", "fair") else "#fff"
         return (f'<span class="badge" '
-                f'style="background:{colour};color:'
-                f'{'#111' if grade in ('excellent','good','fair') else '#fff'}"'
-                f'>{h(grade)}</span>')
+                f'style="background:{colour};color:{text_colour}">'
+                f'{h(grade)}</span>')
 
     def norm_eff_cell(vf: "VideoFile") -> str:
         colour = GRADE_CSS.get(vf.grade, "#6b7280")
@@ -912,7 +920,16 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
 <script>
   // Client-side sort
   let sortCol = 0, sortAsc = true;
-  const numCols = new Set([0,1,3,5,6,8]);
+  const numCols = new Set([0,1,3,5,8]);   // pure numeric cols (not Size col 6)
+
+  // Convert a size string like "2.50 GB", "341.2 MB", "512 KB" to bytes for sorting
+  function sizeToBytes(s) {{
+    const m = s.match(/(\\d+\\.?\\d*)\\s*(GB|MB|KB|B)/i);
+    if (!m) return 0;
+    const n = parseFloat(m[1]);
+    const u = m[2].toUpperCase();
+    return n * (u === 'GB' ? 1e9 : u === 'MB' ? 1e6 : u === 'KB' ? 1e3 : 1);
+  }}
 
   function cellVal(row, col) {{
     return row.cells[col]?.innerText.trim() ?? '';
@@ -928,6 +945,10 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
       let av = cellVal(a, col), bv = cellVal(b, col);
       if (av === 'N/A') av = sortAsc ? '99999' : '-1';
       if (bv === 'N/A') bv = sortAsc ? '99999' : '-1';
+      if (col === 6) {{
+        // Size column: unit-aware sort
+        return sortAsc ? sizeToBytes(av) - sizeToBytes(bv) : sizeToBytes(bv) - sizeToBytes(av);
+      }}
       if (numCols.has(col)) {{
         av = parseFloat(av.replace(/[^0-9.]/g, '')) || 0;
         bv = parseFloat(bv.replace(/[^0-9.]/g, '')) || 0;
@@ -975,8 +996,8 @@ def export_txt(good: List["VideoFile"], corrupt: List["VideoFile"],
         headers = ["NormEff", "RawEff", "Codec", "Factor", "Grade",
                    "Pctile", "Size", "Resolution", "Bitrate", "Duration", "Filename"]
         f.write("  ".join(
-            h.rjust(col_w[i]) if i < len(col_w) else h
-            for i, h in enumerate(headers)
+            hdr.rjust(col_w[i]) if i < len(col_w) else hdr
+            for i, hdr in enumerate(headers)
         ) + "\n")
         f.write("-" * 100 + "\n")
 
