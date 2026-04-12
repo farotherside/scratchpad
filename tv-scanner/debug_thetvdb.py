@@ -80,7 +80,9 @@ def main():
         eps = []
     print(f"Episodes found: {len(eps)}")
     if eps:
-        print("First episode:", json.dumps(eps[0], indent=2)[:400])
+        print("First episode (all fields):", json.dumps(eps[0], indent=2))
+        if len(eps) > 1:
+            print("Second episode (all fields):", json.dumps(eps[1], indent=2))
 
     # 5. Also try the plain episodes endpoint
     print(f"\n=== EPISODES (series/{series_id}/episodes/default) ===")
@@ -105,7 +107,7 @@ def main():
         eps2 = []
     print(f"Episodes found: {len(eps2)}")
     if eps2:
-        print("First episode:", json.dumps(eps2[0], indent=2)[:400])
+        print("First episode (all fields):", json.dumps(eps2[0], indent=2))
 
 if __name__ == "__main__":
     main()
