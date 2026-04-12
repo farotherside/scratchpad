@@ -11,11 +11,14 @@ Options:
     --no-ended                     Skip shows whose status is Ended / To Be Determined
     --workers N                    Parallel API workers (default: 4)
     --no-color                     Disable color output
-    --source {tvmaze,thetvdb}      API source to use (default: tvmaze)
+    --source {tvmaze,thetvdb,both}  API source to use (default: tvmaze)
     --thetvdb-apikey PATH          Path to file containing TheTVDB API key
 
-When --source thetvdb is used, both TVmaze AND TheTVDB are queried for each show.
-The episode list that most closely matches the local filesystem is used.
+Source modes:
+  tvmaze   — TVmaze only (no API key required)
+  thetvdb  — TheTVDB only (requires --thetvdb-apikey)
+  both     — Query both sources, use whichever episode list best matches
+             the local filesystem per show (requires --thetvdb-apikey)
 
 Directory structure expected:
     <root>/
@@ -455,122 +458,155 @@ def compare(local: list, remote: list, only_aired: bool = True) -> tuple:
 # ---------------------------------------------------------------------------
 # Per-show worker
 # ---------------------------------------------------------------------------
+def _build_report_from_source(
+    show_name: str,
+    local_eps: list,
+    show: dict,
+    eps: list,
+    source_used: str,
+    tvmaze_id: Optional[int],
+) -> ShowReport:
+    """Helper: build a ShowReport given a resolved show + episode list."""
+    if source_used == "thetvdb":
+        matched_title = show.get("name") or show.get("translations", {}).get("eng", show_name)
+        show_status = show.get("status", {})
+        if isinstance(show_status, dict):
+            show_status = show_status.get("name", "Unknown")
+    else:
+        matched_title = show.get("name", show_name)
+        show_status = show.get("status", "Unknown")
+
+    missing, extra = compare(local_eps, eps)
+    return ShowReport(
+        show_name=show_name,
+        matched_title=matched_title,
+        tvmaze_id=tvmaze_id,
+        status=show_status,
+        local_seasons={ep.season for ep in local_eps},
+        local_episodes=local_eps,
+        remote_episodes=eps,
+        missing=missing,
+        extra=extra,
+        lookup_error=None,
+        source_used=source_used,
+    )
+
+
+def _lookup_thetvdb(show_name: str) -> tuple:
+    """Returns (show_dict, episodes_list) from TheTVDB, or (None, []) on failure."""
+    show = thetvdb_search_show(show_name)
+    if not show:
+        return None, []
+    try:
+        series_id = show.get("tvdb_id") or show.get("id")
+        if not series_id:
+            return show, []
+        eps = thetvdb_fetch_episodes(int(series_id))
+        return show, eps
+    except Exception as e:
+        print(f"  [thetvdb] episode fetch failed for {show_name}: {e}", file=sys.stderr)
+        return show, []
+
+
 def process_show(show_name: str, local_eps: list, source: str = "tvmaze") -> ShowReport:
     local_ep_count = sum(1 for ep in local_eps if ep.episode != 0)
 
     try:
-        # --- Always fetch from TVmaze ---
-        tvmaze_show = tvmaze_search_show(show_name, local_ep_count=local_ep_count)
-        tvmaze_eps = []
-        if tvmaze_show:
-            try:
-                tvmaze_eps = tvmaze_fetch_episodes(tvmaze_show["id"])
-            except Exception:
-                tvmaze_eps = []
-
-        # --- Optionally fetch from TheTVDB ---
-        thetvdb_show = None
-        thetvdb_eps = []
-        if source == "thetvdb" and _thetvdb_token:
-            thetvdb_show = thetvdb_search_show(show_name)
-            if thetvdb_show:
-                try:
-                    series_id = thetvdb_show.get("tvdb_id") or thetvdb_show.get("id")
-                    if series_id:
-                        thetvdb_eps = thetvdb_fetch_episodes(int(series_id))
-                except Exception:
-                    thetvdb_eps = []
-
-        # --- Pick best source ---
-        if source == "thetvdb" and thetvdb_eps:
-            tvmaze_score = _match_score(local_eps, tvmaze_eps)
-            thetvdb_score = _match_score(local_eps, thetvdb_eps)
-
-            if thetvdb_score >= tvmaze_score:
-                # TheTVDB wins (or tied — prefer thetvdb since that was requested)
-                chosen_show = thetvdb_show
-                chosen_eps = thetvdb_eps
-                chosen_source = "thetvdb"
-                matched_title = thetvdb_show.get("name") or thetvdb_show.get("translations", {}).get("eng", show_name)
-                show_status = thetvdb_show.get("status", {})
-                if isinstance(show_status, dict):
-                    show_status = show_status.get("name", "Unknown")
-                tvmaze_id = tvmaze_show["id"] if tvmaze_show else None
-            else:
-                # TVmaze is a better fit
-                chosen_show = tvmaze_show
-                chosen_eps = tvmaze_eps
-                chosen_source = "tvmaze"
-                matched_title = tvmaze_show["name"] if tvmaze_show else None
-                show_status = tvmaze_show.get("status", "Unknown") if tvmaze_show else "Unknown"
-                tvmaze_id = tvmaze_show["id"] if tvmaze_show else None
-        else:
-            # Pure TVmaze mode
-            if not tvmaze_show:
+        # ── TVmaze-only ───────────────────────────────────────────────────────
+        if source == "tvmaze":
+            show = tvmaze_search_show(show_name, local_ep_count=local_ep_count)
+            if not show:
                 return ShowReport(
-                    show_name=show_name,
-                    matched_title=None,
-                    tvmaze_id=None,
-                    status=None,
-                    local_seasons=set(),
-                    local_episodes=local_eps,
-                    remote_episodes=[],
-                    missing=[],
-                    extra=[],
-                    lookup_error="No TVmaze match found",
-                    source_used="tvmaze",
+                    show_name=show_name, matched_title=None, tvmaze_id=None,
+                    status=None, local_seasons=set(), local_episodes=local_eps,
+                    remote_episodes=[], missing=[], extra=[],
+                    lookup_error="No TVmaze match found", source_used="tvmaze",
                 )
-            chosen_show = tvmaze_show
-            chosen_eps = tvmaze_eps
-            chosen_source = "tvmaze"
-            matched_title = tvmaze_show["name"]
-            show_status = tvmaze_show.get("status", "Unknown")
-            tvmaze_id = tvmaze_show["id"]
-
-        if not chosen_eps:
-            return ShowReport(
-                show_name=show_name,
-                matched_title=matched_title if 'matched_title' in dir() else None,
-                tvmaze_id=tvmaze_id if 'tvmaze_id' in dir() else None,
-                status=None,
-                local_seasons=set(),
-                local_episodes=local_eps,
-                remote_episodes=[],
-                missing=[],
-                extra=[],
-                lookup_error=f"No episodes found via {source}",
-                source_used=chosen_source if 'chosen_source' in dir() else source,
+            eps = tvmaze_fetch_episodes(show["id"])
+            if not eps:
+                return ShowReport(
+                    show_name=show_name, matched_title=show.get("name"),
+                    tvmaze_id=show["id"], status=show.get("status"),
+                    local_seasons=set(), local_episodes=local_eps,
+                    remote_episodes=[], missing=[], extra=[],
+                    lookup_error="No episodes found on TVmaze", source_used="tvmaze",
+                )
+            return _build_report_from_source(
+                show_name, local_eps, show, eps, "tvmaze", show["id"]
             )
 
-        missing, extra = compare(local_eps, chosen_eps)
+        # ── TheTVDB-only ──────────────────────────────────────────────────────
+        if source == "thetvdb":
+            show, eps = _lookup_thetvdb(show_name)
+            if not show:
+                return ShowReport(
+                    show_name=show_name, matched_title=None, tvmaze_id=None,
+                    status=None, local_seasons=set(), local_episodes=local_eps,
+                    remote_episodes=[], missing=[], extra=[],
+                    lookup_error="No TheTVDB match found", source_used="thetvdb",
+                )
+            if not eps:
+                matched_title = show.get("name") or show_name
+                return ShowReport(
+                    show_name=show_name, matched_title=matched_title, tvmaze_id=None,
+                    status=None, local_seasons=set(), local_episodes=local_eps,
+                    remote_episodes=[], missing=[], extra=[],
+                    lookup_error="No episodes found on TheTVDB", source_used="thetvdb",
+                )
+            return _build_report_from_source(
+                show_name, local_eps, show, eps, "thetvdb", None
+            )
 
-        return ShowReport(
-            show_name=show_name,
-            matched_title=matched_title,
-            tvmaze_id=tvmaze_id,
-            status=show_status,
-            local_seasons={ep.season for ep in local_eps},
-            local_episodes=local_eps,
-            remote_episodes=chosen_eps,
-            missing=missing,
-            extra=extra,
-            lookup_error=None,
-            source_used=chosen_source,
-        )
+        # ── Both — query both, pick best match ────────────────────────────────
+        if source == "both":
+            # Fetch TVmaze
+            tvmaze_show = tvmaze_search_show(show_name, local_ep_count=local_ep_count)
+            tvmaze_eps = []
+            if tvmaze_show:
+                try:
+                    tvmaze_eps = tvmaze_fetch_episodes(tvmaze_show["id"])
+                except Exception:
+                    tvmaze_eps = []
+
+            # Fetch TheTVDB
+            thetvdb_show, thetvdb_eps = _lookup_thetvdb(show_name)
+
+            # Score both
+            tvmaze_score  = _match_score(local_eps, tvmaze_eps)
+            thetvdb_score = _match_score(local_eps, thetvdb_eps)
+
+            print(
+                f"  [both] {show_name}: TVmaze={tvmaze_score:.2f} TheTVDB={thetvdb_score:.2f}",
+                file=sys.stderr,
+            )
+
+            if not tvmaze_eps and not thetvdb_eps:
+                return ShowReport(
+                    show_name=show_name, matched_title=None, tvmaze_id=None,
+                    status=None, local_seasons=set(), local_episodes=local_eps,
+                    remote_episodes=[], missing=[], extra=[],
+                    lookup_error="No match found on TVmaze or TheTVDB", source_used="both",
+                )
+
+            if thetvdb_score >= tvmaze_score and thetvdb_eps:
+                tvmaze_id = tvmaze_show["id"] if tvmaze_show else None
+                return _build_report_from_source(
+                    show_name, local_eps, thetvdb_show, thetvdb_eps, "thetvdb", tvmaze_id
+                )
+            else:
+                return _build_report_from_source(
+                    show_name, local_eps, tvmaze_show, tvmaze_eps, "tvmaze",
+                    tvmaze_show["id"] if tvmaze_show else None
+                )
+
+        raise ValueError(f"Unknown source: {source}")
 
     except Exception as exc:
         return ShowReport(
-            show_name=show_name,
-            matched_title=None,
-            tvmaze_id=None,
-            status=None,
-            local_seasons=set(),
-            local_episodes=local_eps,
-            remote_episodes=[],
-            missing=[],
-            extra=[],
-            lookup_error=str(exc),
-            source_used=source,
+            show_name=show_name, matched_title=None, tvmaze_id=None,
+            status=None, local_seasons=set(), local_episodes=local_eps,
+            remote_episodes=[], missing=[], extra=[],
+            lookup_error=str(exc), source_used=source,
         )
 
 
@@ -1068,10 +1104,9 @@ def main():
         help="Disable color output even if the terminal supports it"
     )
     parser.add_argument(
-        "--source", choices=["tvmaze", "thetvdb"], default="tvmaze",
-        help="API source to use for episode data (default: tvmaze). "
-             "When 'thetvdb' is selected, both TVmaze and TheTVDB are queried "
-             "and the best-matching source is used per show."
+        "--source", choices=["tvmaze", "thetvdb", "both"], default="tvmaze",
+        help="API source: 'tvmaze' (default), 'thetvdb', or 'both' (query both, "
+             "pick best match per show). 'thetvdb' and 'both' require --thetvdb-apikey."
     )
     parser.add_argument(
         "--thetvdb-apikey", default=None, metavar="PATH",
@@ -1080,7 +1115,7 @@ def main():
     args = parser.parse_args()
 
     # Validate TheTVDB key requirement
-    if args.source == "thetvdb":
+    if args.source in ("thetvdb", "both"):
         if not args.thetvdb_apikey:
             print("ERROR: --thetvdb-apikey PATH is required when --source thetvdb", file=sys.stderr)
             sys.exit(1)
