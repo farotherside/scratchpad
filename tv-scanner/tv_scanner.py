@@ -364,7 +364,11 @@ def thetvdb_search_show(show_name: str) -> Optional[dict]:
 
 
 def thetvdb_fetch_episodes(series_id: int) -> list:
-    """Fetch all regular episodes for a TheTVDB series ID."""
+    """Fetch all regular episodes (seasonNumber > 0) for a TheTVDB series ID.
+
+    TheTVDB paginates results. Page 0 may be entirely specials (season 0),
+    so we must walk all pages and filter afterward.
+    """
     if series_id in _thetvdb_episode_cache:
         return _thetvdb_episode_cache[series_id]
 
@@ -373,17 +377,17 @@ def thetvdb_fetch_episodes(series_id: int) -> list:
     while True:
         try:
             data = _request(
-                f"{THETVDB_BASE}/series/{series_id}/episodes/official",
-                params={"page": page, "season": 0},
+                f"{THETVDB_BASE}/series/{series_id}/episodes/default",
+                params={"page": page},
                 headers=_thetvdb_headers(),
                 rate_delay=THETVDB_RATE_LIMIT_DELAY,
             )
-        except Exception:
+        except Exception as e:
+            print(f"  [thetvdb] page {page} fetch error: {e}", file=sys.stderr)
             break
 
-        eps = data.get("data", {}).get("episodes", [])
-        if not eps:
-            break
+        inner = data.get("data", {})
+        eps = inner.get("episodes", []) if isinstance(inner, dict) else []
 
         for ep in eps:
             s = ep.get("seasonNumber")
@@ -398,9 +402,9 @@ def thetvdb_fetch_episodes(series_id: int) -> list:
                 airdate=airdate,
             ))
 
-        # TheTVDB paginates; check if there are more pages
         links = data.get("links", {})
-        if not links.get("next"):
+        next_page = links.get("next")
+        if not next_page:
             break
         page += 1
 
