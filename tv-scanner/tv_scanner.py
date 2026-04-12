@@ -6,7 +6,7 @@ Usage:
     python tv_scanner.py /path/to/tv/root [options]
 
 Options:
-    --output {text,json,csv}       Output format (default: text)
+    --output {text,json,csv,html}  Output format (default: text)
     --missing-only                 Only show shows/episodes that have gaps
     --no-ended                     Skip shows whose status is Ended / To Be Determined
     --workers N                    Parallel API workers (default: 4)
@@ -575,6 +575,18 @@ def process_show(show_name: str, local_eps: list, source: str = "tvmaze") -> Sho
 
 
 # ---------------------------------------------------------------------------
+# HTML helpers
+# ---------------------------------------------------------------------------
+def _h(text: str) -> str:
+    """HTML-escape a string."""
+    return (str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+# ---------------------------------------------------------------------------
 # Output formatters
 # ---------------------------------------------------------------------------
 def _season_ep(ep) -> str:
@@ -685,6 +697,329 @@ def format_json(reports: list) -> str:
     return json.dumps([rep_to_dict(r) for r in reports], indent=2)
 
 
+def format_html(reports: list, missing_only: bool) -> str:
+    from datetime import datetime
+
+    ok_count = sum(1 for r in reports if r.ok)
+    issue_count = len(reports) - ok_count
+    total_local = sum(len(r.local_episodes) for r in reports)
+    total_missing = sum(len(r.missing) for r in reports)
+
+    # Status colour map
+    STATUS_COLORS = {
+        "Ended":              "#64748b",
+        "Continuing":         "#22c55e",
+        "To Be Determined":   "#f59e0b",
+        "In Development":     "#6366f1",
+    }
+    SOURCE_COLORS = {
+        "tvmaze":  "#6366f1",
+        "thetvdb": "#f59e0b",
+    }
+
+    def status_badge(status: str) -> str:
+        colour = STATUS_COLORS.get(status, "#6b7280")
+        return (f'<span class="badge" style="background:{colour}22;'
+                f'color:{colour};border:1px solid {colour}44">{_h(status)}</span>')
+
+    def source_badge(source: str) -> str:
+        colour = SOURCE_COLORS.get(source, "#6b7280")
+        return (f'<span class="badge source-badge" style="background:{colour}22;'
+                f'color:{colour};border:1px solid {colour}44">{_h(source.upper())}</span>')
+
+    def ep_tag(ep) -> str:
+        return f'<span class="ep-tag">S{ep.season:02d}E{ep.episode:02d}</span>'
+
+    show_rows = []
+    for r in sorted(reports, key=lambda x: x.show_name.lower()):
+        if missing_only and r.ok:
+            continue
+
+        ok_icon = '✓' if r.ok else '✗'
+        row_class = 'row-ok' if r.ok else 'row-issue'
+
+        if r.lookup_error:
+            detail_html = f'<span class="warn">⚠ {_h(r.lookup_error)}</span>'
+        else:
+            detail_parts = []
+            if r.missing:
+                by_season: dict = {}
+                for ep in r.missing:
+                    by_season.setdefault(ep.season, []).append(ep)
+                local_seasons_with_eps = {ep.season for ep in r.local_episodes if ep.episode != 0}
+                today = time.strftime("%Y-%m-%d")
+                for s in sorted(by_season):
+                    eps_in_season = by_season[s]
+                    if s not in local_seasons_with_eps:
+                        count_str = f"{len(eps_in_season)} ep{'s' if len(eps_in_season)!=1 else ''}"
+                        detail_parts.append(
+                            f'<div class="missing-line"><span class="miss-x">✗</span> '
+                            f'<strong>S{s:02d}</strong> entirely missing '
+                            f'<span class="dim">({count_str})</span></div>'
+                        )
+                    else:
+                        tags = " ".join(ep_tag(e) for e in sorted(eps_in_season, key=lambda x: x.episode))
+                        detail_parts.append(
+                            f'<div class="missing-line"><span class="miss-x">✗</span> '
+                            f'Missing <strong>S{s:02d}</strong>: {tags}</div>'
+                        )
+            if r.extra:
+                tags = " ".join(ep_tag(e) for e in sorted(r.extra, key=lambda x: (x.season, x.episode)))
+                src = r.source_used.upper()
+                detail_parts.append(
+                    f'<div class="extra-line"><span class="extra-q">?</span> '
+                    f'Extra (not in {src}): {tags}</div>'
+                )
+            if not detail_parts:
+                detail_parts.append('<span class="all-ok">✓ All aired episodes present</span>')
+            detail_html = "\n".join(detail_parts)
+
+        matched_note = ""
+        if r.matched_title and r.matched_title != r.show_name:
+            matched_note = f'<span class="matched-title dim">→ {_h(r.matched_title)}</span>'
+
+        show_rows.append(f"""
+        <tr class="{row_class}">
+          <td class="ok-col">{ok_icon}</td>
+          <td class="show-name">
+            {_h(r.show_name)}
+            {matched_note}
+          </td>
+          <td>{status_badge(r.status or 'Unknown') if r.status else ''}</td>
+          <td>{source_badge(r.source_used)}</td>
+          <td class="num">{len(r.local_episodes)}</td>
+          <td class="num">{len(r.remote_episodes)}</td>
+          <td class="num miss-count">{len(r.missing) if r.missing else ''}</td>
+          <td class="detail-col">{detail_html}</td>
+        </tr>""")
+
+    rows_html = "\n".join(show_rows)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tv-scanner report</title>
+<style>
+  :root {{
+    --bg:      #0f1117;
+    --surface: #1a1d27;
+    --border:  #2a2d3a;
+    --text:    #e2e8f0;
+    --dim:     #64748b;
+    --accent:  #6366f1;
+    --green:   #22c55e;
+    --red:     #ef4444;
+    --yellow:  #f59e0b;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+    padding: 2rem;
+  }}
+  h1 {{ font-size: 1.4rem; font-weight: 700; margin-bottom: .25rem; color: #f1f5f9; }}
+  .meta {{ color: var(--dim); font-size: .8rem; margin-bottom: 1.5rem; }}
+  .summary {{
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: .75rem;
+    margin-bottom: 1.5rem;
+  }}
+  .card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .75rem 1rem;
+  }}
+  .card .label {{ font-size: .7rem; text-transform: uppercase;
+                  letter-spacing: .05em; color: var(--dim); }}
+  .card .value {{ font-size: 1.2rem; font-weight: 700; margin-top: .2rem; }}
+  .toolbar {{ display: flex; align-items: center; gap: 1rem; margin-bottom: .75rem; flex-wrap: wrap; }}
+  input#search {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: .4rem .8rem;
+    font-size: .85rem;
+    outline: none;
+    width: 260px;
+  }}
+  input#search:focus {{ border-color: var(--accent); }}
+  label.filter-label {{
+    color: var(--dim);
+    font-size: .8rem;
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+    cursor: pointer;
+  }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }}
+  thead th {{
+    background: var(--surface);
+    color: var(--dim);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: .68rem;
+    letter-spacing: .04em;
+    padding: .55rem .6rem;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    position: sticky;
+    top: 0;
+    cursor: pointer;
+    user-select: none;
+  }}
+  thead th:hover {{ color: var(--text); }}
+  thead th.sorted {{ color: var(--accent); }}
+  .num {{ text-align: right; }}
+  tbody tr {{
+    border-bottom: 1px solid var(--border);
+    transition: background .1s;
+  }}
+  tbody tr:hover {{ background: var(--surface); }}
+  td {{ padding: .5rem .6rem; vertical-align: top; }}
+  .ok-col {{ width: 24px; text-align: center; font-weight: 700; }}
+  .row-ok  .ok-col {{ color: var(--green); }}
+  .row-issue .ok-col {{ color: var(--red); }}
+  .show-name {{ font-weight: 600; color: #cbd5e1; min-width: 180px; }}
+  .matched-title {{ display: block; font-size: .75rem; font-weight: 400; margin-top: .15rem; }}
+  .dim {{ color: var(--dim); }}
+  .badge {{
+    display: inline-block;
+    padding: .15rem .5rem;
+    border-radius: 999px;
+    font-size: .7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }}
+  .source-badge {{ font-size: .65rem; }}
+  .miss-count {{ color: var(--red); font-weight: 700; }}
+  .detail-col {{ max-width: 600px; }}
+  .missing-line, .extra-line {{ margin: .15rem 0; }}
+  .miss-x {{ color: var(--red); font-weight: 700; margin-right: .3rem; }}
+  .extra-q {{ color: var(--yellow); font-weight: 700; margin-right: .3rem; }}
+  .warn {{ color: var(--yellow); }}
+  .all-ok {{ color: var(--green); }}
+  .ep-tag {{
+    display: inline-block;
+    background: var(--border);
+    border-radius: 4px;
+    padding: .1rem .35rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: .72rem;
+    margin: .1rem .1rem;
+  }}
+  .row-issue .ep-tag {{ background: #ef444422; color: #fca5a5; }}
+  footer {{ margin-top: 2rem; color: var(--dim); font-size: .75rem; }}
+</style>
+</head>
+<body>
+<h1>⚙ tv-scanner report</h1>
+<div class="meta">
+  Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+</div>
+
+<div class="summary">
+  <div class="card"><div class="label">Shows scanned</div><div class="value">{len(reports)}</div></div>
+  <div class="card"><div class="label">Complete</div><div class="value" style="color:var(--green)">{ok_count}</div></div>
+  <div class="card"><div class="label">Issues</div><div class="value" style="color:{'var(--red)' if issue_count else 'var(--green)'}">{issue_count}</div></div>
+  <div class="card"><div class="label">Local episodes</div><div class="value">{total_local}</div></div>
+  <div class="card"><div class="label">Missing episodes</div><div class="value" style="color:{'var(--red)' if total_missing else 'var(--green)'}">{total_missing}</div></div>
+</div>
+
+<div class="toolbar">
+  <input id="search" type="text" placeholder="Filter by show name…" oninput="filterTable(this.value)">
+  <label class="filter-label">
+    <input type="checkbox" id="issues-only" onchange="toggleIssues(this.checked)">
+    Issues only
+  </label>
+</div>
+
+<table id="main-table">
+  <thead>
+    <tr>
+      <th onclick="sortTable(0)"></th>
+      <th onclick="sortTable(1)">Show</th>
+      <th onclick="sortTable(2)">Status</th>
+      <th onclick="sortTable(3)">Source</th>
+      <th class="num sorted" onclick="sortTable(4)">Local ↕</th>
+      <th class="num" onclick="sortTable(5)">Remote ↕</th>
+      <th class="num" onclick="sortTable(6)">Missing ↕</th>
+      <th>Detail</th>
+    </tr>
+  </thead>
+  <tbody id="main-tbody">
+    {rows_html}
+  </tbody>
+</table>
+
+<footer>tv-scanner &nbsp;·&nbsp; Episode data from TVmaze / TheTVDB</footer>
+
+<script>
+  let sortCol = 4, sortAsc = true;
+  const numCols = new Set([4, 5, 6]);
+
+  function cellVal(row, col) {{
+    return row.cells[col]?.innerText.trim() ?? '';
+  }}
+
+  function sortTable(col) {{
+    if (sortCol === col) sortAsc = !sortAsc;
+    else {{ sortCol = col; sortAsc = true; }}
+    const tbody = document.getElementById('main-tbody');
+    const rows = Array.from(tbody.rows).filter(r => r.style.display !== 'none' || true);
+    rows.sort((a, b) => {{
+      let av = cellVal(a, col), bv = cellVal(b, col);
+      if (numCols.has(col)) {{
+        av = parseInt(av) || 0;
+        bv = parseInt(bv) || 0;
+        return sortAsc ? av - bv : bv - av;
+      }}
+      return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+    }});
+    rows.forEach(r => tbody.appendChild(r));
+    document.querySelectorAll('thead th').forEach((th, i) => {{
+      th.classList.toggle('sorted', i === col);
+      if (i === col) th.textContent = th.textContent.replace(/ [↑↓]$/, '') + (sortAsc ? ' ↑' : ' ↓');
+    }});
+  }}
+
+  function filterTable(query) {{
+    const q = query.toLowerCase();
+    const issuesOnly = document.getElementById('issues-only').checked;
+    Array.from(document.getElementById('main-tbody').rows).forEach(row => {{
+      const name = cellVal(row, 1).toLowerCase();
+      const isIssue = row.classList.contains('row-issue');
+      row.style.display = (name.includes(q) && (!issuesOnly || isIssue)) ? '' : 'none';
+    }});
+  }}
+
+  function toggleIssues(on) {{
+    const q = document.getElementById('search').value.toLowerCase();
+    Array.from(document.getElementById('main-tbody').rows).forEach(row => {{
+      const name = cellVal(row, 1).toLowerCase();
+      const isIssue = row.classList.contains('row-issue');
+      row.style.display = (name.includes(q) && (!on || isIssue)) ? '' : 'none';
+    }});
+  }}
+</script>
+</body>
+</html>
+"""
+    return html
+
+
 def format_csv(reports: list) -> str:
     import io
     buf = io.StringIO()
@@ -713,7 +1048,7 @@ def main():
     )
     parser.add_argument("root", help="Root directory of the TV library")
     parser.add_argument(
-        "--output", choices=["text", "json", "csv"], default="text",
+        "--output", choices=["text", "json", "csv", "html"], default="text",
         help="Output format (default: text)"
     )
     parser.add_argument(
@@ -766,6 +1101,10 @@ def main():
     if args.output == "text" and not args.outfile and not args.no_color:
         USE_COLOR = _detect_color_support()
 
+    # HTML output requires --outfile (warn if going to stdout)
+    if args.output == "html" and not args.outfile:
+        print("Warning: outputting raw HTML to stdout. Consider using --outfile report.html", file=sys.stderr)
+
     root = Path(args.root).expanduser().resolve()
     print(f"Scanning library: {root}", file=sys.stderr)
 
@@ -803,6 +1142,8 @@ def main():
         output = format_text(reports, args.missing_only)
     elif args.output == "json":
         output = format_json(reports)
+    elif args.output == "html":
+        output = format_html(reports, args.missing_only)
     else:
         output = format_csv(reports)
 
