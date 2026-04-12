@@ -199,6 +199,14 @@ def parse_season_number(folder_name: str) -> Optional[int]:
 # ---------------------------------------------------------------------------
 # Episode filename parsing
 # ---------------------------------------------------------------------------
+
+# Multi-episode: S01E01-E03 or S01E01E02 (returns season + range of episodes)
+_MULTI_EP_RE = re.compile(
+    r"[Ss](\d+)[Ee](\d+)[-–]?[Ee](\d+)",
+    re.IGNORECASE,
+)
+
+# Single-episode patterns tried in order
 _EP_PATTERNS = [
     re.compile(r"[Ss](\d+)[Ee](\d+)", re.IGNORECASE),
     re.compile(r"(\d+)[xX](\d+)"),
@@ -206,15 +214,39 @@ _EP_PATTERNS = [
 ]
 
 
-def parse_episode_from_filename(filename: str) -> Optional[tuple]:
+def parse_episodes_from_filename(filename: str) -> list[tuple[int, int]]:
+    """Return list of (season, episode) tuples covered by this file.
+
+    Handles:
+      S01E01           → [(1, 1)]
+      S01E01-E03       → [(1, 1), (1, 2), (1, 3)]
+      S01E01E02        → [(1, 1), (1, 2)]
+      1x02             → [(1, 2)]
+    """
     stem = Path(filename).stem
+
+    # Try multi-episode first: S01E01-E03 or S01E01E02
+    m = _MULTI_EP_RE.search(stem)
+    if m:
+        s, e_start, e_end = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 0 < s < 100 and 0 < e_start < 300 and 0 < e_end < 300 and e_end >= e_start:
+            return [(s, e) for e in range(e_start, e_end + 1)]
+
+    # Single-episode patterns
     for pat in _EP_PATTERNS:
         m = pat.search(stem)
         if m:
             s, e = int(m.group(1)), int(m.group(2))
             if 0 < s < 100 and 0 < e < 300:
-                return s, e
-    return None
+                return [(s, e)]
+
+    return []
+
+
+def parse_episode_from_filename(filename: str) -> Optional[tuple]:
+    """Legacy single-result wrapper — returns first (season, episode) or None."""
+    results = parse_episodes_from_filename(filename)
+    return results[0] if results else None
 
 
 # ---------------------------------------------------------------------------
@@ -243,10 +275,11 @@ def scan_local_library(root: Path) -> dict:
             for f in sorted(season_dir.iterdir()):
                 if f.suffix.lower() not in VIDEO_EXTS:
                     continue
-                parsed = parse_episode_from_filename(f.name)
+                parsed = parse_episodes_from_filename(f.name)
                 if parsed:
-                    ep_s, ep_e = parsed
-                    episodes.append(LocalEpisode(season=ep_s, episode=ep_e, path=f))
+                    # Emit one LocalEpisode per episode number covered by the file
+                    for ep_s, ep_e in parsed:
+                        episodes.append(LocalEpisode(season=ep_s, episode=ep_e, path=f))
                 else:
                     episodes.append(LocalEpisode(season=season_num, episode=0, path=f))
 
