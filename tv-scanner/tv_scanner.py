@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-tv_scanner.py — Compare a local TV library against TVmaze episode data.
+tv_scanner.py — Compare a local TV library against TVmaze and/or TheTVDB episode data.
 
 Usage:
     python tv_scanner.py /path/to/tv/root [options]
 
 Options:
-    --output {text,json,csv}   Output format (default: text)
-    --missing-only             Only show shows/episodes that have gaps
-    --no-ended                 Skip shows whose status is Ended / To Be Determined
-    --workers N                Parallel TVmaze workers (default: 4)
-    --no-color                 Disable color output
+    --output {text,json,csv}       Output format (default: text)
+    --missing-only                 Only show shows/episodes that have gaps
+    --no-ended                     Skip shows whose status is Ended / To Be Determined
+    --workers N                    Parallel API workers (default: 4)
+    --no-color                     Disable color output
+    --source {tvmaze,thetvdb}      API source to use (default: tvmaze)
+    --thetvdb-apikey PATH          Path to file containing TheTVDB API key
+
+When --source thetvdb is used, both TVmaze AND TheTVDB are queried for each show.
+The episode list that most closely matches the local filesystem is used.
 
 Directory structure expected:
     <root>/
@@ -39,10 +44,12 @@ import requests
 # Constants
 # ---------------------------------------------------------------------------
 TVMAZE_BASE = "https://api.tvmaze.com"
+THETVDB_BASE = "https://api4.thetvdb.com/v4"
 REQUEST_TIMEOUT = 15          # seconds per HTTP request
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF = 2.0           # seconds
 RATE_LIMIT_DELAY = 0.2        # polite delay between requests (TVmaze is free/public)
+THETVDB_RATE_LIMIT_DELAY = 0.5
 
 # File extensions considered video files
 VIDEO_EXTS = {
@@ -55,18 +62,10 @@ VIDEO_EXTS = {
 # ---------------------------------------------------------------------------
 
 def _detect_color_support() -> bool:
-    """Return True if the terminal appears to support ANSI color.
-
-    Permissive approach: if stdout is a TTY, assume color is supported
-    unless TERM is explicitly set to a known non-color value ('dumb') or
-    is completely absent.  COLORTERM and TERM_PROGRAM override everything.
-    """
     if not sys.stdout.isatty():
         return False
-    # Explicit opt-out: NO_COLOR convention (https://no-color.org)
     if os.environ.get("NO_COLOR") is not None:
         return False
-    # Explicit opt-in signals
     colorterm = os.environ.get("COLORTERM", "").lower()
     if colorterm:
         return True
@@ -74,17 +73,14 @@ def _detect_color_support() -> bool:
     if term_program:
         return True
     term = os.environ.get("TERM", "").lower()
-    # Only known non-color values are excluded; everything else (incl. 'ansi') gets color
     no_color_terms = {"", "dumb", "unknown"}
     return term not in no_color_terms
 
 
-# Module-level flag — set in main() after parsing --no-color
 USE_COLOR: bool = False
 
 
 class _C:
-    """ANSI escape codes. Only used when USE_COLOR is True."""
     RESET         = "\033[0m"
     BOLD          = "\033[1m"
     DIM           = "\033[2m"
@@ -101,29 +97,16 @@ class _C:
 
 
 def _col(code: str, text: str) -> str:
-    """Wrap text in an ANSI code + reset, if color is enabled."""
     if not USE_COLOR:
         return text
     return f"{code}{text}{_C.RESET}"
 
-
-def _bold(text: str) -> str:
-    return _col(_C.BOLD, text)
-
-def _red(text: str) -> str:
-    return _col(_C.BRIGHT_RED, text)
-
-def _green(text: str) -> str:
-    return _col(_C.BRIGHT_GREEN, text)
-
-def _yellow(text: str) -> str:
-    return _col(_C.BRIGHT_YELLOW, text)
-
-def _cyan(text: str) -> str:
-    return _col(_C.BRIGHT_CYAN, text)
-
-def _dim(text: str) -> str:
-    return _col(_C.DIM, text)
+def _bold(text: str) -> str: return _col(_C.BOLD, text)
+def _red(text: str) -> str:  return _col(_C.BRIGHT_RED, text)
+def _green(text: str) -> str: return _col(_C.BRIGHT_GREEN, text)
+def _yellow(text: str) -> str: return _col(_C.BRIGHT_YELLOW, text)
+def _cyan(text: str) -> str:  return _col(_C.BRIGHT_CYAN, text)
+def _dim(text: str) -> str:   return _col(_C.DIM, text)
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +115,7 @@ def _dim(text: str) -> str:
 @dataclass
 class LocalEpisode:
     season: int
-    episode: int           # first episode number if multi-ep file
+    episode: int
     path: Path
 
 
@@ -149,13 +132,14 @@ class ShowReport:
     show_name: str
     matched_title: Optional[str]
     tvmaze_id: Optional[int]
-    status: Optional[str]             # Continuing / Ended / etc.
-    local_seasons: set[int]
-    local_episodes: list[LocalEpisode]
-    remote_episodes: list[RemoteEpisode]
-    missing: list[RemoteEpisode]
-    extra: list[LocalEpisode]         # local files with no TVmaze match
+    status: Optional[str]
+    local_seasons: set
+    local_episodes: list
+    remote_episodes: list
+    missing: list
+    extra: list
     lookup_error: Optional[str]
+    source_used: str = "tvmaze"   # "tvmaze" or "thetvdb"
 
     @property
     def ok(self) -> bool:
@@ -163,19 +147,19 @@ class ShowReport:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Generic HTTP helper
 # ---------------------------------------------------------------------------
-def _request(url: str, params: dict = None) -> dict | list:
+def _request(url: str, params: dict = None, headers: dict = None, rate_delay: float = RATE_LIMIT_DELAY) -> dict | list:
     """GET with retry + polite rate-limit."""
     for attempt in range(RETRY_ATTEMPTS):
         try:
-            resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            resp = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
             if resp.status_code == 429:
                 retry_after = float(resp.headers.get("Retry-After", RETRY_BACKOFF * (attempt + 1)))
                 time.sleep(retry_after)
                 continue
             resp.raise_for_status()
-            time.sleep(RATE_LIMIT_DELAY)
+            time.sleep(rate_delay)
             return resp.json()
         except requests.RequestException as exc:
             if attempt == RETRY_ATTEMPTS - 1:
@@ -190,8 +174,8 @@ def _request(url: str, params: dict = None) -> dict | list:
 _SEASON_RE = re.compile(
     r"""
     (?:
-        season[\s._-]*(\d+)       # "Season 1", "Season_2"
-      | s[\s._-]?(\d+)            # "S01", "s1", "s 2"
+        season[\s._-]*(\d+)
+      | s[\s._-]?(\d+)
     )
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -203,7 +187,6 @@ def parse_season_number(folder_name: str) -> Optional[int]:
     if m:
         val = m.group(1) or m.group(2)
         return int(val)
-    # bare number?
     bare = re.fullmatch(r"\d+", folder_name.strip())
     if bare:
         return int(bare.group())
@@ -213,19 +196,14 @@ def parse_season_number(folder_name: str) -> Optional[int]:
 # ---------------------------------------------------------------------------
 # Episode filename parsing
 # ---------------------------------------------------------------------------
-# Patterns tried in order — first match wins
 _EP_PATTERNS = [
-    # S01E02, S01E02E03, s1e2
     re.compile(r"[Ss](\d+)[Ee](\d+)", re.IGNORECASE),
-    # 1x02
     re.compile(r"(\d+)[xX](\d+)"),
-    # .102. or _102_ (season + 2-digit ep, e.g. 102 = s01e02)
     re.compile(r"(?<!\d)(\d)(\d{2})(?!\d)"),
 ]
 
 
-def parse_episode_from_filename(filename: str) -> Optional[tuple[int, int]]:
-    """Return (season, episode) from a filename, or None."""
+def parse_episode_from_filename(filename: str) -> Optional[tuple]:
     stem = Path(filename).stem
     for pat in _EP_PATTERNS:
         m = pat.search(stem)
@@ -239,12 +217,8 @@ def parse_episode_from_filename(filename: str) -> Optional[tuple[int, int]]:
 # ---------------------------------------------------------------------------
 # Local library scan
 # ---------------------------------------------------------------------------
-def scan_local_library(root: Path) -> dict[str, list[LocalEpisode]]:
-    """
-    Walk root/ looking for show folders → season subfolders → video files.
-    Returns {show_folder_name: [LocalEpisode, …]}.
-    """
-    library: dict[str, list[LocalEpisode]] = {}
+def scan_local_library(root: Path) -> dict:
+    library: dict = {}
 
     if not root.is_dir():
         print(f"ERROR: {root} is not a directory", file=sys.stderr)
@@ -254,14 +228,13 @@ def scan_local_library(root: Path) -> dict[str, list[LocalEpisode]]:
         if not show_dir.is_dir() or show_dir.name.startswith("."):
             continue
 
-        episodes: list[LocalEpisode] = []
+        episodes = []
 
         for season_dir in sorted(show_dir.iterdir()):
             if not season_dir.is_dir():
                 continue
             season_num = parse_season_number(season_dir.name)
             if season_num is None:
-                # Try files directly inside show folder (flat layout)
                 continue
 
             for f in sorted(season_dir.iterdir()):
@@ -272,8 +245,6 @@ def scan_local_library(root: Path) -> dict[str, list[LocalEpisode]]:
                     ep_s, ep_e = parsed
                     episodes.append(LocalEpisode(season=ep_s, episode=ep_e, path=f))
                 else:
-                    # File inside a known season folder but couldn't parse ep#
-                    # Treat it as a placeholder (season known, ep unknown = 0)
                     episodes.append(LocalEpisode(season=season_num, episode=0, path=f))
 
         if episodes:
@@ -285,21 +256,18 @@ def scan_local_library(root: Path) -> dict[str, list[LocalEpisode]]:
 # ---------------------------------------------------------------------------
 # TVmaze lookups
 # ---------------------------------------------------------------------------
-
-# Simple module-level cache so disambiguation + main fetch don't double-hit
-_episode_cache: dict[int, list[RemoteEpisode]] = {}
+_tvmaze_episode_cache: dict = {}
 
 
-def fetch_episodes(tvmaze_id: int) -> list[RemoteEpisode]:
-    """Fetch full episode list for a show (cached)."""
-    if tvmaze_id in _episode_cache:
-        return _episode_cache[tvmaze_id]
+def tvmaze_fetch_episodes(tvmaze_id: int) -> list:
+    if tvmaze_id in _tvmaze_episode_cache:
+        return _tvmaze_episode_cache[tvmaze_id]
 
     data = _request(f"{TVMAZE_BASE}/shows/{tvmaze_id}/episodes")
     episodes = []
     for ep in data:
         if ep.get("type", "regular") != "regular":
-            continue  # skip specials (type: "significant_special", etc.)
+            continue
         s = ep.get("season")
         e = ep.get("number")
         if s and e:
@@ -310,81 +278,171 @@ def fetch_episodes(tvmaze_id: int) -> list[RemoteEpisode]:
                 airdate=ep.get("airdate", ""),
             ))
 
-    _episode_cache[tvmaze_id] = episodes
+    _tvmaze_episode_cache[tvmaze_id] = episodes
     return episodes
 
 
-def _aired_episode_count(tvmaze_id: int) -> int:
-    """Return the number of aired regular episodes for a candidate show."""
+def _tvmaze_aired_count(tvmaze_id: int) -> int:
     today = time.strftime("%Y-%m-%d")
-    eps = fetch_episodes(tvmaze_id)
+    eps = tvmaze_fetch_episodes(tvmaze_id)
     return sum(1 for e in eps if e.airdate and e.airdate <= today)
 
 
-def search_show(show_name: str, local_ep_count: int = 0) -> Optional[dict]:
-    """Return the best TVmaze show match or None.
-
-    When multiple candidates exist:
-      - 'In Development' shows are always excluded.
-      - Among remaining candidates, the one whose aired episode count is
-        closest to *local_ep_count* wins.
-    """
+def tvmaze_search_show(show_name: str, local_ep_count: int = 0) -> Optional[dict]:
     results = _request(f"{TVMAZE_BASE}/search/shows", params={"q": show_name})
     if not results:
         return None
 
-    # Filter out shows that are purely "In Development"
     candidates = [
         r["show"] for r in results
         if r["show"].get("status", "") != "In Development"
     ]
-
     if not candidates:
         return None
-
     if len(candidates) == 1 or local_ep_count == 0:
         return candidates[0]
 
-    # Multiple candidates — score by closeness of episode count to local library
-    # Only check the top 5 results to limit extra API calls
     top = candidates[:5]
     best_show = top[0]
     best_diff = float("inf")
-
     for show in top:
         try:
-            remote_count = _aired_episode_count(show["id"])
+            remote_count = _tvmaze_aired_count(show["id"])
             diff = abs(remote_count - local_ep_count)
             if diff < best_diff:
                 best_diff = diff
                 best_show = show
         except Exception:
-            pass  # If we can't fetch, skip this candidate
-
+            pass
     return best_show
+
+
+# ---------------------------------------------------------------------------
+# TheTVDB lookups
+# ---------------------------------------------------------------------------
+_thetvdb_token: Optional[str] = None
+_thetvdb_episode_cache: dict = {}
+
+
+def thetvdb_init(api_key: str) -> None:
+    """Authenticate with TheTVDB and store bearer token."""
+    global _thetvdb_token
+    resp = requests.post(
+        f"{THETVDB_BASE}/login",
+        json={"apikey": api_key},
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    _thetvdb_token = resp.json()["data"]["token"]
+
+
+def _thetvdb_headers() -> dict:
+    if not _thetvdb_token:
+        raise RuntimeError("TheTVDB token not initialized. Call thetvdb_init() first.")
+    return {"Authorization": f"Bearer {_thetvdb_token}"}
+
+
+def thetvdb_search_show(show_name: str) -> Optional[dict]:
+    """Return best TheTVDB series match or None."""
+    try:
+        data = _request(
+            f"{THETVDB_BASE}/search",
+            params={"query": show_name, "type": "series"},
+            headers=_thetvdb_headers(),
+            rate_delay=THETVDB_RATE_LIMIT_DELAY,
+        )
+        results = data.get("data", [])
+        if not results:
+            return None
+        # Return the top result
+        return results[0]
+    except Exception:
+        return None
+
+
+def thetvdb_fetch_episodes(series_id: int) -> list:
+    """Fetch all regular episodes for a TheTVDB series ID."""
+    if series_id in _thetvdb_episode_cache:
+        return _thetvdb_episode_cache[series_id]
+
+    episodes = []
+    page = 0
+    while True:
+        try:
+            data = _request(
+                f"{THETVDB_BASE}/series/{series_id}/episodes/official",
+                params={"page": page, "season": 0},
+                headers=_thetvdb_headers(),
+                rate_delay=THETVDB_RATE_LIMIT_DELAY,
+            )
+        except Exception:
+            break
+
+        eps = data.get("data", {}).get("episodes", [])
+        if not eps:
+            break
+
+        for ep in eps:
+            s = ep.get("seasonNumber")
+            e = ep.get("number")
+            if not s or not e or s == 0:
+                continue  # skip specials (season 0)
+            airdate = ep.get("aired", "") or ""
+            episodes.append(RemoteEpisode(
+                season=s,
+                episode=e,
+                name=ep.get("name", "") or "",
+                airdate=airdate,
+            ))
+
+        # TheTVDB paginates; check if there are more pages
+        links = data.get("links", {})
+        if not links.get("next"):
+            break
+        page += 1
+
+    _thetvdb_episode_cache[series_id] = episodes
+    return episodes
+
+
+# ---------------------------------------------------------------------------
+# Match scoring — how well does a remote episode list match local files?
+# ---------------------------------------------------------------------------
+def _match_score(local: list, remote: list) -> float:
+    """
+    Score how well a remote episode list matches local files.
+    Returns a score where HIGHER is BETTER.
+    Based on: fraction of local episodes found in remote list.
+    """
+    if not remote or not local:
+        return 0.0
+
+    today = time.strftime("%Y-%m-%d")
+    remote_set = {
+        (ep.season, ep.episode) for ep in remote
+        if ep.airdate and ep.airdate <= today
+    }
+    local_known = [(ep.season, ep.episode) for ep in local if ep.episode != 0]
+    if not local_known:
+        return 0.0
+
+    matches = sum(1 for ep in local_known if ep in remote_set)
+    return matches / len(local_known)
 
 
 # ---------------------------------------------------------------------------
 # Comparison logic
 # ---------------------------------------------------------------------------
-def compare(
-    local: list[LocalEpisode],
-    remote: list[RemoteEpisode],
-    only_aired: bool = True,
-) -> tuple[list[RemoteEpisode], list[LocalEpisode]]:
-    """
-    Returns (missing_remote_eps, extra_local_eps).
-    `only_aired`: ignore remote episodes that have no airdate yet.
-    """
+def compare(local: list, remote: list, only_aired: bool = True) -> tuple:
     local_set = {(ep.season, ep.episode) for ep in local if ep.episode != 0}
     today = time.strftime("%Y-%m-%d")
 
     missing = []
     for rep in remote:
         if only_aired and rep.airdate and rep.airdate > today:
-            continue  # hasn't aired yet
+            continue
         if only_aired and not rep.airdate:
-            continue  # no known airdate — skip
+            continue
         if (rep.season, rep.episode) not in local_set:
             missing.append(rep)
 
@@ -397,42 +455,107 @@ def compare(
 # ---------------------------------------------------------------------------
 # Per-show worker
 # ---------------------------------------------------------------------------
-def process_show(show_name: str, local_eps: list[LocalEpisode]) -> ShowReport:
+def process_show(show_name: str, local_eps: list, source: str = "tvmaze") -> ShowReport:
     local_ep_count = sum(1 for ep in local_eps if ep.episode != 0)
 
     try:
-        show = search_show(show_name, local_ep_count=local_ep_count)
-        if not show:
+        # --- Always fetch from TVmaze ---
+        tvmaze_show = tvmaze_search_show(show_name, local_ep_count=local_ep_count)
+        tvmaze_eps = []
+        if tvmaze_show:
+            try:
+                tvmaze_eps = tvmaze_fetch_episodes(tvmaze_show["id"])
+            except Exception:
+                tvmaze_eps = []
+
+        # --- Optionally fetch from TheTVDB ---
+        thetvdb_show = None
+        thetvdb_eps = []
+        if source == "thetvdb" and _thetvdb_token:
+            thetvdb_show = thetvdb_search_show(show_name)
+            if thetvdb_show:
+                try:
+                    series_id = thetvdb_show.get("tvdb_id") or thetvdb_show.get("id")
+                    if series_id:
+                        thetvdb_eps = thetvdb_fetch_episodes(int(series_id))
+                except Exception:
+                    thetvdb_eps = []
+
+        # --- Pick best source ---
+        if source == "thetvdb" and thetvdb_eps:
+            tvmaze_score = _match_score(local_eps, tvmaze_eps)
+            thetvdb_score = _match_score(local_eps, thetvdb_eps)
+
+            if thetvdb_score >= tvmaze_score:
+                # TheTVDB wins (or tied — prefer thetvdb since that was requested)
+                chosen_show = thetvdb_show
+                chosen_eps = thetvdb_eps
+                chosen_source = "thetvdb"
+                matched_title = thetvdb_show.get("name") or thetvdb_show.get("translations", {}).get("eng", show_name)
+                show_status = thetvdb_show.get("status", {})
+                if isinstance(show_status, dict):
+                    show_status = show_status.get("name", "Unknown")
+                tvmaze_id = tvmaze_show["id"] if tvmaze_show else None
+            else:
+                # TVmaze is a better fit
+                chosen_show = tvmaze_show
+                chosen_eps = tvmaze_eps
+                chosen_source = "tvmaze"
+                matched_title = tvmaze_show["name"] if tvmaze_show else None
+                show_status = tvmaze_show.get("status", "Unknown") if tvmaze_show else "Unknown"
+                tvmaze_id = tvmaze_show["id"] if tvmaze_show else None
+        else:
+            # Pure TVmaze mode
+            if not tvmaze_show:
+                return ShowReport(
+                    show_name=show_name,
+                    matched_title=None,
+                    tvmaze_id=None,
+                    status=None,
+                    local_seasons=set(),
+                    local_episodes=local_eps,
+                    remote_episodes=[],
+                    missing=[],
+                    extra=[],
+                    lookup_error="No TVmaze match found",
+                    source_used="tvmaze",
+                )
+            chosen_show = tvmaze_show
+            chosen_eps = tvmaze_eps
+            chosen_source = "tvmaze"
+            matched_title = tvmaze_show["name"]
+            show_status = tvmaze_show.get("status", "Unknown")
+            tvmaze_id = tvmaze_show["id"]
+
+        if not chosen_eps:
             return ShowReport(
                 show_name=show_name,
-                matched_title=None,
-                tvmaze_id=None,
+                matched_title=matched_title if 'matched_title' in dir() else None,
+                tvmaze_id=tvmaze_id if 'tvmaze_id' in dir() else None,
                 status=None,
                 local_seasons=set(),
                 local_episodes=local_eps,
                 remote_episodes=[],
                 missing=[],
                 extra=[],
-                lookup_error="No TVmaze match found",
+                lookup_error=f"No episodes found via {source}",
+                source_used=chosen_source if 'chosen_source' in dir() else source,
             )
 
-        tvmaze_id = show["id"]
-        matched_title = show["name"]
-        status = show.get("status", "Unknown")
-        remote_eps = fetch_episodes(tvmaze_id)
-        missing, extra = compare(local_eps, remote_eps)
+        missing, extra = compare(local_eps, chosen_eps)
 
         return ShowReport(
             show_name=show_name,
             matched_title=matched_title,
             tvmaze_id=tvmaze_id,
-            status=status,
+            status=show_status,
             local_seasons={ep.season for ep in local_eps},
             local_episodes=local_eps,
-            remote_episodes=remote_eps,
+            remote_episodes=chosen_eps,
             missing=missing,
             extra=extra,
             lookup_error=None,
+            source_used=chosen_source,
         )
 
     except Exception as exc:
@@ -447,6 +570,7 @@ def process_show(show_name: str, local_eps: list[LocalEpisode]) -> ShowReport:
             missing=[],
             extra=[],
             lookup_error=str(exc),
+            source_used=source,
         )
 
 
@@ -457,7 +581,7 @@ def _season_ep(ep) -> str:
     return f"S{ep.season:02d}E{ep.episode:02d}"
 
 
-def format_text(reports: list[ShowReport], missing_only: bool) -> str:
+def format_text(reports: list, missing_only: bool) -> str:
     lines = []
     ok_count = sum(1 for r in reports if r.ok)
     issue_count = len(reports) - ok_count
@@ -472,10 +596,10 @@ def format_text(reports: list[ShowReport], missing_only: bool) -> str:
         if missing_only and report.ok:
             continue
 
-        # Build header
+        source_label = report.source_used.upper()
         title_part = _bold(_cyan(f"► {report.show_name}"))
         if report.matched_title and report.matched_title != report.show_name:
-            title_part += _dim(f"  [TVmaze: {report.matched_title}]")
+            title_part += _dim(f"  [{source_label}: {report.matched_title}]")
         if report.status:
             title_part += f"  {_dim(f'({report.status})')}"
         lines.append(title_part)
@@ -489,36 +613,30 @@ def format_text(reports: list[ShowReport], missing_only: bool) -> str:
         remote_count = len(report.remote_episodes)
         lines.append(
             f"    Local: {local_count} episodes  |  "
-            f"TVmaze (aired): {remote_count} episodes"
+            f"{source_label} (aired): {remote_count} episodes"
         )
 
         if not report.missing and not report.extra:
             lines.append(f"    {_green('✓ All aired episodes present')}")
         else:
             if report.missing:
-                # Build per-season breakdown
-                by_season: dict[int, list[RemoteEpisode]] = {}
+                by_season: dict = {}
                 for ep in report.missing:
                     by_season.setdefault(ep.season, []).append(ep)
 
-                # Seasons that have at least one local episode
                 local_seasons_with_eps = {
                     ep.season for ep in report.local_episodes if ep.episode != 0
                 }
 
-                # Aired remote episodes by season (for "entire season" check)
                 today = time.strftime("%Y-%m-%d")
-                aired_by_season: dict[int, int] = {}
+                aired_by_season: dict = {}
                 for ep in report.remote_episodes:
                     if ep.airdate and ep.airdate <= today:
                         aired_by_season[ep.season] = aired_by_season.get(ep.season, 0) + 1
 
                 for s in sorted(by_season):
                     missing_eps = by_season[s]
-                    aired_in_season = aired_by_season.get(s, 0)
-
                     if s not in local_seasons_with_eps:
-                        # Zero local episodes for this season → entire season missing
                         count_str = f"{len(missing_eps)} episode{'s' if len(missing_eps) != 1 else ''}"
                         lines.append(
                             f"    {_red('✗')} {_red(f'Season {s:02d} entirely missing')} "
@@ -536,20 +654,21 @@ def format_text(reports: list[ShowReport], missing_only: bool) -> str:
                     _season_ep(e)
                     for e in sorted(report.extra, key=lambda x: (x.season, x.episode))
                 )
-                lines.append(f"    {_yellow('?')} Extra (not in TVmaze): {_yellow(ep_list)}")
+                lines.append(f"    {_yellow('?')} Extra (not in {source_label}): {_yellow(ep_list)}")
 
         lines.append("")
 
     return "\n".join(lines)
 
 
-def format_json(reports: list[ShowReport]) -> str:
+def format_json(reports: list) -> str:
     def rep_to_dict(r: ShowReport) -> dict:
         return {
             "show_name": r.show_name,
             "matched_title": r.matched_title,
             "tvmaze_id": r.tvmaze_id,
             "status": r.status,
+            "source_used": r.source_used,
             "local_episode_count": len(r.local_episodes),
             "remote_episode_count": len(r.remote_episodes),
             "ok": r.ok,
@@ -566,19 +685,19 @@ def format_json(reports: list[ShowReport]) -> str:
     return json.dumps([rep_to_dict(r) for r in reports], indent=2)
 
 
-def format_csv(reports: list[ShowReport]) -> str:
+def format_csv(reports: list) -> str:
     import io
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow([
-        "show_name", "matched_title", "tvmaze_id", "status",
+        "show_name", "matched_title", "tvmaze_id", "status", "source_used",
         "local_episodes", "remote_episodes", "missing_count", "ok", "error",
     ])
     for r in sorted(reports, key=lambda x: x.show_name.lower()):
         writer.writerow([
             r.show_name, r.matched_title or "", r.tvmaze_id or "",
-            r.status or "", len(r.local_episodes), len(r.remote_episodes),
-            len(r.missing), r.ok, r.lookup_error or "",
+            r.status or "", r.source_used, len(r.local_episodes),
+            len(r.remote_episodes), len(r.missing), r.ok, r.lookup_error or "",
         ])
     return buf.getvalue()
 
@@ -590,7 +709,7 @@ def main():
     global USE_COLOR
 
     parser = argparse.ArgumentParser(
-        description="Compare a local TV library against TVmaze episode data."
+        description="Compare a local TV library against TVmaze and/or TheTVDB episode data."
     )
     parser.add_argument("root", help="Root directory of the TV library")
     parser.add_argument(
@@ -603,7 +722,7 @@ def main():
     )
     parser.add_argument(
         "--workers", type=int, default=4,
-        help="Parallel TVmaze API workers (default: 4)"
+        help="Parallel API workers (default: 4)"
     )
     parser.add_argument(
         "--outfile", default=None,
@@ -613,7 +732,35 @@ def main():
         "--no-color", action="store_true",
         help="Disable color output even if the terminal supports it"
     )
+    parser.add_argument(
+        "--source", choices=["tvmaze", "thetvdb"], default="tvmaze",
+        help="API source to use for episode data (default: tvmaze). "
+             "When 'thetvdb' is selected, both TVmaze and TheTVDB are queried "
+             "and the best-matching source is used per show."
+    )
+    parser.add_argument(
+        "--thetvdb-apikey", default=None, metavar="PATH",
+        help="Path to file containing TheTVDB API key (required when --source thetvdb)"
+    )
     args = parser.parse_args()
+
+    # Validate TheTVDB key requirement
+    if args.source == "thetvdb":
+        if not args.thetvdb_apikey:
+            print("ERROR: --thetvdb-apikey PATH is required when --source thetvdb", file=sys.stderr)
+            sys.exit(1)
+        try:
+            api_key = Path(args.thetvdb_apikey).read_text().strip()
+        except Exception as e:
+            print(f"ERROR: Could not read TheTVDB API key from {args.thetvdb_apikey}: {e}", file=sys.stderr)
+            sys.exit(1)
+        print("Authenticating with TheTVDB…", file=sys.stderr)
+        try:
+            thetvdb_init(api_key)
+            print("TheTVDB authenticated.", file=sys.stderr)
+        except Exception as e:
+            print(f"ERROR: TheTVDB authentication failed: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # Set color flag — only for text output to stdout
     if args.output == "text" and not args.outfile and not args.no_color:
@@ -625,10 +772,10 @@ def main():
     library = scan_local_library(root)
     print(f"Found {len(library)} show directories", file=sys.stderr)
 
-    reports: list[ShowReport] = []
+    reports: list = []
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(process_show, name, eps): name
+            pool.submit(process_show, name, eps, args.source): name
             for name, eps in library.items()
         }
         done = 0
@@ -641,8 +788,9 @@ def main():
                 print(f"  [{done}/{len(library)}] ERROR {show_name}: {exc}", file=sys.stderr)
                 continue
             status_icon = "✓" if report.ok else "✗"
+            src = f"[{report.source_used}]" if args.source == "thetvdb" else ""
             print(
-                f"  [{done}/{len(library)}] {status_icon} {show_name}"
+                f"  [{done}/{len(library)}] {status_icon} {show_name} {src}"
                 + (f" — {len(report.missing)} missing" if report.missing else "")
                 + (f" — {report.lookup_error}" if report.lookup_error else ""),
                 file=sys.stderr,
