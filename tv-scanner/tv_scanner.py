@@ -37,9 +37,9 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import requests
 
@@ -152,7 +152,7 @@ class ShowReport:
 # ---------------------------------------------------------------------------
 # Generic HTTP helper
 # ---------------------------------------------------------------------------
-def _request(url: str, params: dict = None, headers: dict = None, rate_delay: float = RATE_LIMIT_DELAY) -> dict | list:
+def _request(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None, rate_delay: float = RATE_LIMIT_DELAY) -> Union[Dict[str, Any], List[Any]]:
     """GET with retry + polite rate-limit."""
     for attempt in range(RETRY_ATTEMPTS):
         try:
@@ -214,7 +214,7 @@ _EP_PATTERNS = [
 ]
 
 
-def parse_episodes_from_filename(filename: str) -> list[tuple[int, int]]:
+def parse_episodes_from_filename(filename: str) -> List[Tuple[int, int]]:
     """Return list of (season, episode) tuples covered by this file.
 
     Handles:
@@ -243,7 +243,7 @@ def parse_episodes_from_filename(filename: str) -> list[tuple[int, int]]:
     return []
 
 
-def parse_episode_from_filename(filename: str) -> Optional[tuple]:
+def parse_episode_from_filename(filename: str) -> Optional[Tuple[int, int]]:
     """Legacy single-result wrapper — returns first (season, episode) or None."""
     results = parse_episodes_from_filename(filename)
     return results[0] if results else None
@@ -252,8 +252,8 @@ def parse_episode_from_filename(filename: str) -> Optional[tuple]:
 # ---------------------------------------------------------------------------
 # Local library scan
 # ---------------------------------------------------------------------------
-def scan_local_library(root: Path) -> dict:
-    library: dict = {}
+def scan_local_library(root: Path) -> Dict[str, List[LocalEpisode]]:
+    library: Dict[str, List[LocalEpisode]] = {}
 
     if not root.is_dir():
         print(f"ERROR: {root} is not a directory", file=sys.stderr)
@@ -261,6 +261,9 @@ def scan_local_library(root: Path) -> dict:
 
     for show_dir in sorted(root.iterdir()):
         if not show_dir.is_dir() or show_dir.name.startswith("."):
+            continue
+
+        if show_dir.name.startswith("._"):
             continue
 
         episodes = []
@@ -273,6 +276,8 @@ def scan_local_library(root: Path) -> dict:
                 continue
 
             for f in sorted(season_dir.iterdir()):
+                if f.name.startswith("._"):
+                    continue
                 if f.suffix.lower() not in VIDEO_EXTS:
                     continue
                 parsed = parse_episodes_from_filename(f.name)
@@ -1183,7 +1188,7 @@ def main():
     library = scan_local_library(root)
     print(f"Found {len(library)} show directories", file=sys.stderr)
 
-    reports: list = []
+    reports: List[ShowReport] = []
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
             pool.submit(process_show, name, eps, args.source): name

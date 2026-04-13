@@ -299,7 +299,11 @@ def collect_files(directory: Path, recursive: bool) -> List[Path]:
     results = []
     it = directory.rglob("*") if recursive else directory.iterdir()
     for p in it:
-        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS:
+        if not p.is_file():
+            continue
+        if p.name.startswith("._"):
+            continue
+        if p.suffix.lower() in VIDEO_EXTENSIONS:
             results.append(p)
     return sorted(results)
 
