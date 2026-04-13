@@ -311,6 +311,10 @@ def collect_files(directory: Path, recursive: bool) -> List[Path]:
 # ---------------------------------------------------------------------------
 # Probing
 # ---------------------------------------------------------------------------
+def _decode_subprocess_output(data: bytes) -> str:
+    return data.decode("utf-8", errors="replace")
+
+
 def run_ffprobe(path: Path) -> Optional[dict]:
     cmd = [
         "ffprobe", "-v", "quiet",
@@ -319,10 +323,11 @@ def run_ffprobe(path: Path) -> Optional[dict]:
         str(path),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0 or not result.stdout.strip():
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        stdout_text = _decode_subprocess_output(result.stdout)
+        if result.returncode != 0 or not stdout_text.strip():
             return None
-        return json.loads(result.stdout)
+        return json.loads(stdout_text)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return None
 
@@ -404,7 +409,7 @@ def deep_probe(vf: "VideoFile") -> "VideoFile":
             "-frames:v", "1", "-f", "null", "-",
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, timeout=60)
             if result.returncode != 0:
                 vf.corrupt = True
                 vf.corrupt_reason = (
