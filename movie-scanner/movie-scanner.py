@@ -34,6 +34,7 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -173,6 +174,8 @@ class VideoFile:
     norm_efficiency: float = 0.0    # raw_efficiency / codec_factor (H.264-equivalent)
     percentile: float = 0.0         # 0–100, position in library (set post-scan)
     grade: str = ""                 # excellent/good/fair/poor/terrible (set post-scan)
+    vmaf_mean: Optional[float] = None
+    vmaf_reference: str = ""
 
     @property
     def size_mb(self) -> float:
@@ -276,7 +279,20 @@ def assign_grades(files: List["VideoFile"]):
 # ---------------------------------------------------------------------------
 # Dependency check
 # ---------------------------------------------------------------------------
-def check_dependencies():
+def _ffmpeg_has_filter(filter_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            capture_output=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    output = _decode_subprocess_output(result.stdout) + "\n" + _decode_subprocess_output(result.stderr)
+    return filter_name in output
+
+
+def check_dependencies(require_vmaf: bool = False):
     missing = []
     for tool in ("ffprobe", "ffmpeg"):
         if not shutil.which(tool):
@@ -288,6 +304,10 @@ def check_dependencies():
         print(DIM("    sudo dnf install ffmpeg     # Fedora"))
         print(DIM("    sudo pacman -S ffmpeg       # Arch"))
         print(DIM("    brew install ffmpeg         # macOS"))
+        sys.exit(1)
+    if require_vmaf and not _ffmpeg_has_filter("libvmaf"):
+        print(RED("✗ ffmpeg was found, but it does not include the libvmaf filter."))
+        print(DIM("  Install/build an ffmpeg package with libvmaf enabled, then rerun with --vmaf-reference."))
         sys.exit(1)
     print(GREEN("✓") + f" ffprobe: {shutil.which('ffprobe')}")
 
@@ -428,6 +448,36 @@ def deep_probe(vf: "VideoFile") -> "VideoFile":
     return vf
 
 
+def compute_vmaf(distorted_path: Path, reference_path: Path) -> Optional[float]:
+    with NamedTemporaryFile(mode="w+b", suffix=".json", delete=True) as tmp:
+        cmd = [
+            "ffmpeg", "-hide_banner", "-nostats",
+            "-i", str(distorted_path),
+            "-i", str(reference_path),
+            "-lavfi", "[0:v]setpts=PTS-STARTPTS[dist];[1:v]setpts=PTS-STARTPTS[ref];[dist][ref]libvmaf=log_fmt=json:log_path={}".format(tmp.name),
+            "-f", "null", "-",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=3600)
+            if result.returncode != 0:
+                return None
+            tmp.seek(0)
+            raw = tmp.read()
+            if not raw:
+                return None
+            data = json.loads(_decode_subprocess_output(raw))
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+            return None
+
+    pooled = data.get("pooled_metrics", {})
+    vmaf = pooled.get("vmaf", {}) if isinstance(pooled, dict) else {}
+    mean = vmaf.get("mean") if isinstance(vmaf, dict) else None
+    try:
+        return float(mean) if mean is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
@@ -457,6 +507,10 @@ def fmt_codec_factor(factor: float) -> str:
     return f"{factor:.1f}x"
 
 
+def fmt_vmaf(vmaf: Optional[float]) -> str:
+    return "N/A" if vmaf is None else f"{vmaf:.2f}"
+
+
 GRADE_COLOUR = {
     "excellent": GREEN,
     "good":      GREEN,
@@ -483,6 +537,7 @@ COLUMNS = [
     # (header, fixed_width, align)
     ("NormEff",   8, "right"),   # codec-normalised efficiency
     ("RawEff",    8, "right"),   # raw bits/pixel
+    ("VMAF",      6, "right"),
     ("Codec",     7, "left"),
     ("Factor",    7, "right"),   # codec efficiency multiplier
     ("Grade",     9, "left"),
@@ -531,6 +586,7 @@ def print_table(files: List["VideoFile"], sort_by: str, descending: bool):
         raw_cells = [
             fmt_efficiency(vf.norm_efficiency),
             fmt_efficiency(vf.raw_efficiency),
+            fmt_vmaf(vf.vmaf_mean),
             vf.codec or "unknown",
             fmt_codec_factor(vf.codec_factor),
             vf.grade,
@@ -554,7 +610,7 @@ def print_table(files: List["VideoFile"], sort_by: str, descending: bool):
             if i == 0:
                 fn = GRADE_COLOUR.get(vf.grade, lambda t: t)
                 rendered = fn(truncated)
-            elif i == 4:  # Grade
+            elif i == 5:  # Grade
                 rendered = coloured_grade(truncated)
             else:
                 rendered = truncated
@@ -595,6 +651,7 @@ CSV_FIELDS = [
     "duration_s", "duration_hms", "fps",
     "bitrate_bps", "bitrate_fmt",
     "raw_efficiency", "norm_efficiency",
+    "vmaf_mean", "vmaf_reference",
     "percentile", "grade",
     "format_name", "audio_codecs",
     "corrupt", "corrupt_reason",
@@ -618,6 +675,8 @@ def file_to_dict(vf: "VideoFile") -> dict:
         "bitrate_fmt":     fmt_bitrate(vf.bitrate_bps),
         "raw_efficiency":  fmt_efficiency(vf.raw_efficiency),
         "norm_efficiency": fmt_efficiency(vf.norm_efficiency),
+        "vmaf_mean":       fmt_vmaf(vf.vmaf_mean),
+        "vmaf_reference":  vf.vmaf_reference,
         "percentile":      f"{vf.percentile:.1f}",
         "grade":           vf.grade,
         "format_name":     vf.format_name,
@@ -1001,8 +1060,8 @@ def export_txt(good: List["VideoFile"], corrupt: List["VideoFile"],
         f.write("Grade   = percentile rank within this library.\n\n")
         f.write("-" * 100 + "\n")
 
-        col_w = [8, 8, 7, 7, 9, 7, 9, 12, 10, 9]
-        headers = ["NormEff", "RawEff", "Codec", "Factor", "Grade",
+        col_w = [8, 8, 6, 7, 7, 9, 7, 9, 12, 10, 9]
+        headers = ["NormEff", "RawEff", "VMAF", "Codec", "Factor", "Grade",
                    "Pctile", "Size", "Resolution", "Bitrate", "Duration", "Filename"]
         f.write("  ".join(
             hdr.rjust(col_w[i]) if i < len(col_w) else hdr
@@ -1015,6 +1074,7 @@ def export_txt(good: List["VideoFile"], corrupt: List["VideoFile"],
             cells = [
                 d["norm_efficiency"].rjust(8),
                 d["raw_efficiency"].rjust(8),
+                d["vmaf_mean"].rjust(6),
                 d["codec"].ljust(7),
                 d["codec_factor"].rjust(7),
                 d["grade"].ljust(9),
@@ -1074,6 +1134,15 @@ def print_summary(good: List["VideoFile"], corrupt: List["VideoFile"],
             print(f"  Worst encoded:    {worst.path.name}  "
                   f"[{worst.codec} {fmt_efficiency(worst.norm_efficiency)}]")
 
+        vmaf_scores = [vf.vmaf_mean for vf in good if vf.vmaf_mean is not None]
+        if vmaf_scores:
+            avg_vmaf = sum(vmaf_scores) / len(vmaf_scores)
+            best_vmaf = max((vf for vf in good if vf.vmaf_mean is not None), key=lambda v: v.vmaf_mean)
+            worst_vmaf = min((vf for vf in good if vf.vmaf_mean is not None), key=lambda v: v.vmaf_mean)
+            print(f"  Avg VMAF:         {fmt_vmaf(avg_vmaf)}")
+            print(f"  Best VMAF:        {best_vmaf.path.name}  [{fmt_vmaf(best_vmaf.vmaf_mean)}]")
+            print(f"  Worst VMAF:       {worst_vmaf.path.name}  [{fmt_vmaf(worst_vmaf.vmaf_mean)}]")
+
         grade_counts: Dict[str, int] = {}
         for vf in good:
             grade_counts[vf.grade] = grade_counts.get(vf.grade, 0) + 1
@@ -1091,6 +1160,7 @@ def print_summary(good: List["VideoFile"], corrupt: List["VideoFile"],
 # ---------------------------------------------------------------------------
 SORT_KEYS = {
     "efficiency": lambda v: (v.norm_efficiency == float("inf"), v.norm_efficiency),
+    "vmaf":       lambda v: (v.vmaf_mean is None, -(v.vmaf_mean or 0.0)),
     "size":       lambda v: v.size_bytes,
     "bitrate":    lambda v: v.bitrate_bps,
     "resolution": lambda v: v.width * v.height,
@@ -1108,8 +1178,9 @@ def parse_args():
     p = argparse.ArgumentParser(
         prog="movie-scanner",
         description=(
-            "Scan a directory for video files, detect corruption, and rank by "
-            "codec-normalised encoding efficiency."
+            "Scan a directory for video files, detect corruption, rank by "
+            "codec-normalised encoding efficiency, and optionally compute VMAF "
+            "against a reference encode."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -1131,6 +1202,8 @@ Codec factors (vs H.264 = 1.0):  AV1=2.5  HEVC=1.8  VP9=1.4  MPEG4=0.7  MPEG2=0.
                    help="Deep corruption scan: decode frames at 3 points (slower)")
     p.add_argument("--sort", choices=list(SORT_KEYS.keys()), default="efficiency",
                    help="Sort field (default: efficiency)")
+    p.add_argument("--vmaf-reference", metavar="FILE",
+                   help="Compute VMAF for each scanned file against this reference file")
     p.add_argument("--desc", action="store_true",
                    help="Sort descending")
     p.add_argument("--csv", metavar="FILE", help="Export results to CSV")
@@ -1153,7 +1226,7 @@ def main():
 
     print(BOLD("\n⚙  movie-scanner"))
     print(DIM("   Checking dependencies..."))
-    check_dependencies()
+    check_dependencies(require_vmaf=bool(args.vmaf_reference))
 
     directory = Path(args.directory).expanduser().resolve()
     if not directory.is_dir():
@@ -1162,6 +1235,13 @@ def main():
 
     print(DIM(f"   Directory:  {directory}"))
     print(DIM(f"   Recursive:  {'yes' if args.recursive else 'no'}"))
+    reference_path = None
+    if args.vmaf_reference:
+        reference_path = Path(args.vmaf_reference).expanduser().resolve()
+        if not reference_path.is_file():
+            print(RED(f"✗ Not a file: {reference_path}"))
+            sys.exit(1)
+        print(YELLOW(f"   VMAF ref:   {reference_path}"))
     if args.deep:
         print(YELLOW("   Deep scan:  enabled (this will be slow)"))
 
@@ -1199,6 +1279,22 @@ def main():
 
     good    = [vf for vf in results if not vf.corrupt]
     corrupt = [vf for vf in results if vf.corrupt]
+
+    if reference_path and good:
+        if not args.quiet:
+            print(DIM(f"   Computing VMAF against reference for {len(good)} valid file(s)..."))
+        vmaf_done = 0
+        for vf in good:
+            vf.vmaf_reference = str(reference_path)
+            if vf.path == reference_path:
+                vf.vmaf_mean = 100.0
+            else:
+                vf.vmaf_mean = compute_vmaf(vf.path, reference_path)
+            vmaf_done += 1
+            if not args.quiet:
+                print(f"\r  [VMAF {vmaf_done:3d}/{len(good)}] {fmt_vmaf(vf.vmaf_mean):>6}  {_trunc(vf.path.name, 50):<50}", end="", flush=True)
+        if not args.quiet:
+            print()
 
     # Assign percentile grades across the full valid set
     assign_grades(good)
