@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-tv_scanner.py — Compare a local TV library against TVmaze and/or TheTVDB episode data.
+tv-scanner.py — Compare a local TV library against TVmaze and/or TheTVDB episode data.
 
 Usage:
-    python tv_scanner.py /path/to/tv/root [options]
+    python tv-scanner.py /path/to/tv/root [options]
 
 Options:
     --output {text,json,csv,html}  Output format (default: text)

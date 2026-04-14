@@ -41,7 +41,7 @@ No API key is needed for TVmaze-only mode. TheTVDB mode requires an API key file
 
 ```bash
 # Scan a TV library and open the HTML report
-python3 tv_scanner.py /media/external/TV --html
+python3 tv-scanner.py /media/external/TV --html
 open report.html      # macOS
 xdg-open report.html  # Linux
 ```
@@ -49,7 +49,7 @@ xdg-open report.html  # Linux
 ## Usage
 
 ```bash
-python3 tv_scanner.py /path/to/tv/root [options]
+python3 tv-scanner.py /path/to/tv/root [options]
 ```
 
 ### Options
@@ -69,19 +69,19 @@ python3 tv_scanner.py /path/to/tv/root [options]
 
 ```bash
 # Basic scan — print to terminal and save an HTML report
-python3 tv_scanner.py /media/usb/TV --html
+python3 tv-scanner.py /media/usb/TV --html
 
 # Only show problems, HTML saved to a specific path
-python3 tv_scanner.py /media/usb/TV --missing-only --html ~/reports/tv.html
+python3 tv-scanner.py /media/usb/TV --missing-only --html ~/reports/tv.html
 
 # Machine-readable JSON
-python3 tv_scanner.py /media/usb/TV --output json --outfile report.json
+python3 tv-scanner.py /media/usb/TV --output json --outfile report.json
 
 # CSV for spreadsheet import
-python3 tv_scanner.py /media/usb/TV --output csv --outfile report.csv
+python3 tv-scanner.py /media/usb/TV --output csv --outfile report.csv
 
 # Query both TVmaze and TheTVDB, pick best match per show
-python3 tv_scanner.py /media/usb/TV --source both --thetvdb-apikey ~/.config/thetvdb.key
+python3 tv-scanner.py /media/usb/TV --source both --thetvdb-apikey ~/.config/thetvdb.key
 ```
 
 ## Understanding the HTML report
