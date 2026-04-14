@@ -5,10 +5,10 @@ Scan a local TV library and compare it against [TVmaze](https://www.tvmaze.com/a
 ## Screenshots
 
 ### HTML report
-![HTML report](docs/screenshot-html.png)
+![HTML report](docs/screenshot-html.jpg)
 
 ### Terminal output
-![Terminal output](docs/screenshot-terminal.png)
+![Terminal output](docs/screenshot-terminal.jpg)
 
 ## Requirements
 
