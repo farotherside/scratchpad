@@ -794,19 +794,75 @@ def format_html(reports: list, missing_only: bool) -> str:
         "tvmaze":  "#6366f1",
         "thetvdb": "#f59e0b",
     }
+    STATUS_DESC = {
+        "Ended":            "This show has finished airing — no new episodes expected.",
+        "Continuing":        "This show is still airing — new episodes may appear.",
+        "To Be Determined": "Renewal status is unknown.",
+        "In Development":   "This show has not yet started airing.",
+    }
 
     def status_badge(status: str) -> str:
         colour = STATUS_COLORS.get(status, "#6b7280")
-        return (f'<span class="badge" style="background:{colour}22;'
-                f'color:{colour};border:1px solid {colour}44">{_h(status)}</span>')
+        tip = _h(STATUS_DESC.get(status, f"Show status: {status}"))
+        return (f'<span class="badge has-tip" style="background:{colour}22;'
+                f'color:{colour};border:1px solid {colour}44" data-tip="{tip}">{_h(status)}</span>')
 
     def source_badge(source: str) -> str:
         colour = SOURCE_COLORS.get(source, "#6b7280")
-        return (f'<span class="badge source-badge" style="background:{colour}22;'
-                f'color:{colour};border:1px solid {colour}44">{_h(source.upper())}</span>')
+        descs = {
+            "tvmaze":  "Episode data sourced from TVmaze (tvmaze.com). No API key required.",
+            "thetvdb": "Episode data sourced from TheTVDB (thetvdb.com). Requires an API key.",
+            "both":    "Both TVmaze and TheTVDB were queried; the better match was used.",
+        }
+        tip = _h(descs.get(source, source))
+        return (f'<span class="badge source-badge has-tip" style="background:{colour}22;'
+                f'color:{colour};border:1px solid {colour}44" data-tip="{tip}">{_h(source.upper())}</span>')
 
-    def ep_tag(ep) -> str:
-        return f'<span class="ep-tag">S{ep.season:02d}E{ep.episode:02d}</span>'
+    def ep_tag(ep, remote_map=None) -> str:
+        """Render an episode tag. If remote_map provided, adds hover with name/airdate."""
+        code = f"S{ep.season:02d}E{ep.episode:02d}"
+        tip = ""
+        if remote_map:
+            rem = remote_map.get((ep.season, ep.episode))
+            if rem:
+                parts = [code]
+                if rem.name:
+                    parts.append(rem.name)
+                if rem.airdate:
+                    parts.append(f"Aired: {rem.airdate}")
+                tip = _h("\n".join(parts))
+        if tip:
+            return f'<span class="ep-tag has-tip" data-tip="{tip}">{_h(code)}</span>'
+        return f'<span class="ep-tag">{_h(code)}</span>'
+
+    def build_show_tip(r) -> str:
+        """Build the hover tooltip for the show-name cell."""
+        lines = []
+        if r.matched_title and r.matched_title != r.show_name:
+            lines.append(f"Matched as: {r.matched_title}")
+        if r.status:
+            lines.append(f"Status: {r.status}")
+        if r.tvmaze_id:
+            lines.append(f"TVmaze ID: {r.tvmaze_id}")
+        lines.append(f"Source: {r.source_used}")
+        lines.append("")
+
+        # Season breakdown
+        local_by_season: dict = {}
+        for ep in r.local_episodes:
+            if ep.episode != 0:
+                local_by_season.setdefault(ep.season, []). append(ep)
+
+        for s in sorted(local_by_season):
+            eps = local_by_season[s]
+            # Collect unique paths for this season
+            paths = sorted({str(ep.path) for ep in eps})
+            lines.append(f"Season {s:02d}: {len(eps)} episode(s)")
+            for p in paths[:6]:   # cap at 6 paths to keep tooltip readable
+                lines.append(f"  └ {p}")
+            if len(paths) > 6:
+                lines.append(f"  └ … and {len(paths)-6} more")
+        return _h("\n".join(lines))
 
     show_rows = []
     for r in sorted(reports, key=lambda x: x.show_name.lower()):
@@ -815,6 +871,9 @@ def format_html(reports: list, missing_only: bool) -> str:
 
         ok_icon = '✓' if r.ok else '✗'
         row_class = 'row-ok' if r.ok else 'row-issue'
+
+        # Build remote episode lookup map for tooltips
+        remote_map = {(ep.season, ep.episode): ep for ep in r.remote_episodes}
 
         if r.lookup_error:
             detail_html = f'<span class="warn">⚠ {_h(r.lookup_error)}</span>'
@@ -825,7 +884,6 @@ def format_html(reports: list, missing_only: bool) -> str:
                 for ep in r.missing:
                     by_season.setdefault(ep.season, []).append(ep)
                 local_seasons_with_eps = {ep.season for ep in r.local_episodes if ep.episode != 0}
-                today = time.strftime("%Y-%m-%d")
                 for s in sorted(by_season):
                     eps_in_season = by_season[s]
                     if s not in local_seasons_with_eps:
@@ -836,13 +894,19 @@ def format_html(reports: list, missing_only: bool) -> str:
                             f'<span class="dim">({count_str})</span></div>'
                         )
                     else:
-                        tags = " ".join(ep_tag(e) for e in sorted(eps_in_season, key=lambda x: x.episode))
+                        tags = " ".join(
+                            ep_tag(e, remote_map)
+                            for e in sorted(eps_in_season, key=lambda x: x.episode)
+                        )
                         detail_parts.append(
                             f'<div class="missing-line"><span class="miss-x">✗</span> '
                             f'Missing <strong>S{s:02d}</strong>: {tags}</div>'
                         )
             if r.extra:
-                tags = " ".join(ep_tag(e) for e in sorted(r.extra, key=lambda x: (x.season, x.episode)))
+                tags = " ".join(
+                    ep_tag(e, remote_map)
+                    for e in sorted(r.extra, key=lambda x: (x.season, x.episode))
+                )
                 src = r.source_used.upper()
                 detail_parts.append(
                     f'<div class="extra-line"><span class="extra-q">?</span> '
@@ -852,6 +916,7 @@ def format_html(reports: list, missing_only: bool) -> str:
                 detail_parts.append('<span class="all-ok">✓ All aired episodes present</span>')
             detail_html = "\n".join(detail_parts)
 
+        show_tip = build_show_tip(r)
         matched_note = ""
         if r.matched_title and r.matched_title != r.show_name:
             matched_note = f'<span class="matched-title dim">→ {_h(r.matched_title)}</span>'
@@ -859,7 +924,7 @@ def format_html(reports: list, missing_only: bool) -> str:
         show_rows.append(f"""
         <tr class="{row_class}">
           <td class="ok-col">{ok_icon}</td>
-          <td class="show-name">
+          <td class="show-name has-tip" data-tip="{show_tip}">
             {_h(r.show_name)}
             {matched_note}
           </td>
@@ -968,7 +1033,7 @@ def format_html(reports: list, missing_only: bool) -> str:
   .ok-col {{ width: 24px; text-align: center; font-weight: 700; }}
   .row-ok  .ok-col {{ color: var(--green); }}
   .row-issue .ok-col {{ color: var(--red); }}
-  .show-name {{ font-weight: 600; color: #cbd5e1; min-width: 180px; }}
+  .show-name {{ font-weight: 600; color: #cbd5e1; min-width: 180px; cursor: default; }}
   .matched-title {{ display: block; font-size: .75rem; font-weight: 400; margin-top: .15rem; }}
   .dim {{ color: var(--dim); }}
   .badge {{
@@ -980,6 +1045,7 @@ def format_html(reports: list, missing_only: bool) -> str:
     text-transform: uppercase;
     letter-spacing: .04em;
     white-space: nowrap;
+    cursor: default;
   }}
   .source-badge {{ font-size: .65rem; }}
   .miss-count {{ color: var(--red); font-weight: 700; }}
@@ -997,12 +1063,37 @@ def format_html(reports: list, missing_only: bool) -> str:
     font-family: 'SF Mono', 'Fira Code', monospace;
     font-size: .72rem;
     margin: .1rem .1rem;
+    cursor: default;
   }}
   .row-issue .ep-tag {{ background: #ef444422; color: #fca5a5; }}
   footer {{ margin-top: 2rem; color: var(--dim); font-size: .75rem; }}
+  /* Tooltip */
+  .tooltip-box {{
+    position: fixed;
+    z-index: 9999;
+    background: #1e2130;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .6rem .85rem;
+    font-size: .78rem;
+    line-height: 1.6;
+    color: var(--text);
+    max-width: 460px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    box-shadow: 0 8px 32px rgba(0,0,0,.6);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .12s;
+  }}
+  .tooltip-box.visible {{ opacity: 1; }}
+  .has-tip {{ cursor: help; }}
+  thead th.has-tip {{ cursor: pointer; }}
+  .th-label {{ border-bottom: 1px dotted var(--dim); }}
 </style>
 </head>
 <body>
+<div class="tooltip-box" id="tt"></div>
 <h1>⚙ tv-scanner report</h1>
 <div class="meta">
   Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
@@ -1019,7 +1110,7 @@ def format_html(reports: list, missing_only: bool) -> str:
 <div class="toolbar">
   <input id="search" type="text" placeholder="Filter by show name…" oninput="filterTable(this.value)">
   <label class="filter-label">
-    <input type="checkbox" id="issues-only" onchange="toggleIssues(this.checked)">
+    <input type="checkbox" id="issues-only" onchange="filterTable(document.getElementById('search').value)">
     Issues only
   </label>
 </div>
@@ -1028,12 +1119,12 @@ def format_html(reports: list, missing_only: bool) -> str:
   <thead>
     <tr>
       <th onclick="sortTable(0)"></th>
-      <th onclick="sortTable(1)">Show</th>
-      <th onclick="sortTable(2)">Status</th>
-      <th onclick="sortTable(3)">Source</th>
-      <th class="num sorted" onclick="sortTable(4)">Local ↕</th>
-      <th class="num" onclick="sortTable(5)">Remote ↕</th>
-      <th class="num" onclick="sortTable(6)">Missing ↕</th>
+      <th class="has-tip" onclick="sortTable(1)" data-tip="Show folder name. Hover the show name in a row to see matched title,&#10;status, TVmaze ID, and a season-by-season file list."><span class="th-label">Show ↕</span></th>
+      <th class="has-tip" onclick="sortTable(2)" data-tip="Current airing status from the metadata source.&#10;Continuing = still airing  ·  Ended = no new episodes  ·  TBD = unknown renewal"><span class="th-label">Status ↕</span></th>
+      <th class="has-tip" onclick="sortTable(3)" data-tip="Metadata source used to look up episode list.&#10;TVmaze = free, no key needed  ·  TheTVDB = requires API key&#10;Hover a source badge for details."><span class="th-label">Source ↕</span></th>
+      <th class="num has-tip sorted" onclick="sortTable(4)" data-tip="Number of episode files found on disk for this show.&#10;Includes all seasons. Hover the show name to see a season breakdown."><span class="th-label">Local ↕</span></th>
+      <th class="num has-tip" onclick="sortTable(5)" data-tip="Number of aired episodes listed by the metadata source.&#10;Only regular aired episodes are counted — specials are excluded."><span class="th-label">Remote ↕</span></th>
+      <th class="num has-tip" onclick="sortTable(6)" data-tip="Number of aired episodes not found on disk.&#10;Hover individual episode tags in the Detail column for name and air date."><span class="th-label">Missing ↕</span></th>
       <th>Detail</th>
     </tr>
   </thead>
@@ -1042,35 +1133,46 @@ def format_html(reports: list, missing_only: bool) -> str:
   </tbody>
 </table>
 
-<footer>tv-scanner &nbsp;·&nbsp; Episode data from TVmaze / TheTVDB</footer>
+<footer>tv-scanner &nbsp;·&nbsp; Episode data from TVmaze / TheTVDB &nbsp;·&nbsp; Hover column headers and show names for explanations</footer>
 
 <script>
+  // ── Tooltip ──────────────────────────────────────────────────────────────
+  const tt = document.getElementById('tt');
+  let ttVisible = false;
+
+  document.addEventListener('mouseover', e => {{
+    const el = e.target.closest('.has-tip');
+    if (!el) return;
+    const text = el.dataset.tip;
+    if (!text) return;
+    tt.textContent = text;
+    tt.classList.add('visible');
+    ttVisible = true;
+  }});
+
+  document.addEventListener('mouseout', e => {{
+    if (!e.target.closest('.has-tip')) return;
+    tt.classList.remove('visible');
+    ttVisible = false;
+  }});
+
+  document.addEventListener('mousemove', e => {{
+    if (!ttVisible) return;
+    const pad = 16;
+    let x = e.clientX + pad, y = e.clientY + pad;
+    const bw = tt.offsetWidth, bh = tt.offsetHeight;
+    if (x + bw > window.innerWidth  - pad) x = e.clientX - bw - pad;
+    if (y + bh > window.innerHeight - pad) y = e.clientY - bh - pad;
+    tt.style.left = x + 'px';
+    tt.style.top  = y + 'px';
+  }});
+
+  // ── Sort / filter ────────────────────────────────────────────────────
   let sortCol = 4, sortAsc = true;
   const numCols = new Set([4, 5, 6]);
 
   function cellVal(row, col) {{
     return row.cells[col]?.innerText.trim() ?? '';
-  }}
-
-  function sortTable(col) {{
-    if (sortCol === col) sortAsc = !sortAsc;
-    else {{ sortCol = col; sortAsc = true; }}
-    const tbody = document.getElementById('main-tbody');
-    const rows = Array.from(tbody.rows).filter(r => r.style.display !== 'none' || true);
-    rows.sort((a, b) => {{
-      let av = cellVal(a, col), bv = cellVal(b, col);
-      if (numCols.has(col)) {{
-        av = parseInt(av) || 0;
-        bv = parseInt(bv) || 0;
-        return sortAsc ? av - bv : bv - av;
-      }}
-      return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
-    }});
-    rows.forEach(r => tbody.appendChild(r));
-    document.querySelectorAll('thead th').forEach((th, i) => {{
-      th.classList.toggle('sorted', i === col);
-      if (i === col) th.textContent = th.textContent.replace(/ [↑↓]$/, '') + (sortAsc ? ' ↑' : ' ↓');
-    }});
   }}
 
   function filterTable(query) {{
@@ -1083,12 +1185,23 @@ def format_html(reports: list, missing_only: bool) -> str:
     }});
   }}
 
-  function toggleIssues(on) {{
-    const q = document.getElementById('search').value.toLowerCase();
-    Array.from(document.getElementById('main-tbody').rows).forEach(row => {{
-      const name = cellVal(row, 1).toLowerCase();
-      const isIssue = row.classList.contains('row-issue');
-      row.style.display = (name.includes(q) && (!on || isIssue)) ? '' : 'none';
+  function sortTable(col) {{
+    if (sortCol === col) sortAsc = !sortAsc;
+    else {{ sortCol = col; sortAsc = true; }}
+    const tbody = document.getElementById('main-tbody');
+    const rows = Array.from(tbody.rows);
+    rows.sort((a, b) => {{
+      let av = cellVal(a, col), bv = cellVal(b, col);
+      if (numCols.has(col)) {{
+        av = parseInt(av) || 0;
+        bv = parseInt(bv) || 0;
+        return sortAsc ? av - bv : bv - av;
+      }}
+      return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+    }});
+    rows.forEach(r => tbody.appendChild(r));
+    document.querySelectorAll('thead th').forEach((th, i) => {{
+      th.classList.toggle('sorted', i === col);
     }});
   }}
 </script>
@@ -1128,6 +1241,11 @@ def main():
     parser.add_argument(
         "--output", choices=["text", "json", "csv", "html"], default="text",
         help="Output format (default: text)"
+    )
+    parser.add_argument(
+        "--html", metavar="FILE", nargs="?", const="",
+        help="Also write a self-contained HTML report. "
+             "Omit FILE to auto-name report.html in the scanned directory."
     )
     parser.add_argument(
         "--missing-only", action="store_true",
@@ -1229,6 +1347,12 @@ def main():
         print(f"Report written to {args.outfile}", file=sys.stderr)
     else:
         print(output)
+
+    # --html: write HTML report in addition to (or instead of) the primary output
+    if args.html is not None:
+        html_path = args.html if args.html else str(root / "report.html")
+        Path(html_path).write_text(format_html(reports, args.missing_only), encoding="utf-8")
+        print(f"HTML report written to {html_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

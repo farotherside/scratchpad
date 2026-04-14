@@ -741,41 +741,70 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
 
     grade_order = ["excellent", "good", "fair", "poor", "terrible", "?"]
 
+    # Plain-English grade descriptions for tooltips
+    GRADE_DESC = {
+        "excellent": "Best-encoded 20% of your library — very efficient for its resolution and codec.",
+        "good":      "Well-encoded — 20th to 45th percentile. Efficient use of space.",
+        "fair":      "Average encoding — 45th to 70th percentile. Some room to re-encode.",
+        "poor":      "Bloated encoding — 70th to 88th percentile. File is larger than it needs to be.",
+        "terrible":  "Worst-encoded 12% of your library — very bloated for its resolution and codec.",
+        "?":         "Could not be graded (unknown bitrate or only one file scanned).",
+    }
+
     def grade_badge(grade: str) -> str:
         colour = GRADE_CSS.get(grade, "#6b7280")
         text_colour = "#111" if grade in ("excellent", "good", "fair") else "#fff"
-        return (f'<span class="badge" '
-                f'style="background:{colour};color:{text_colour}">'
+        tip = h(GRADE_DESC.get(grade, ""))
+        return (f'<span class="badge has-tip" '
+                f'style="background:{colour};color:{text_colour}" '
+                f'data-tip="{tip}">'
                 f'{h(grade)}</span>')
 
     def norm_eff_cell(vf: "VideoFile") -> str:
         colour = GRADE_CSS.get(vf.grade, "#6b7280")
         return f'<span style="color:{colour};font-weight:600">{h(fmt_efficiency(vf.norm_efficiency))}</span>'
 
-    # Build rows
+    # Build rows — filename cell gets a rich hover card
     rows_html = []
     for vf in good:
         d = file_to_dict(vf)
+        audio_str = h(", ".join(vf.audio_codecs) if vf.audio_codecs else "none")
+        vmaf_str  = h(fmt_vmaf(vf.vmaf_mean))
+        tip_lines = [
+            f"Path: {h(str(vf.path))}",
+            f"Size: {h(fmt_size(vf.size_bytes))}",
+            f"Resolution: {h(vf.resolution)}",
+            f"Bitrate: {h(d['bitrate_fmt'])}",
+            f"Duration: {h(vf.duration_hms)}",
+            f"FPS: {h(d['fps'])}",
+            f"Codec: {h(vf.codec)}",
+            f"Audio: {audio_str}",
+            f"Format: {h(vf.format_name)}",
+        ]
+        if vf.vmaf_mean is not None:
+            tip_lines.append(f"VMAF: {vmaf_str}")
+        file_tip = h("\n".join(tip_lines))
         rows_html.append(f"""
         <tr class="grade-{h(vf.grade)}">
-          <td class="mono">{norm_eff_cell(vf)}</td>
-          <td class="mono dim">{h(d['raw_efficiency'])}</td>
+          <td class="mono num">{norm_eff_cell(vf)}</td>
+          <td class="mono num dim">{h(d['raw_efficiency'])}</td>
           <td><code>{h(d['codec'])}</code></td>
-          <td class="dim">{h(d['codec_factor'])}x</td>
+          <td class="dim num">{h(d['codec_factor'])}x</td>
           <td>{grade_badge(vf.grade)}</td>
-          <td class="dim">{h(d['percentile'])}%</td>
-          <td class="mono">{h(fmt_size(vf.size_bytes))}</td>
+          <td class="dim num">{h(d['percentile'])}%</td>
+          <td class="mono num">{h(fmt_size(vf.size_bytes))}</td>
           <td>{h(vf.resolution)}</td>
-          <td class="mono dim">{h(d['bitrate_fmt'])}</td>
+          <td class="mono num dim">{h(d['bitrate_fmt'])}</td>
           <td class="dim">{h(vf.duration_hms)}</td>
-          <td class="filename" title="{h(str(vf.path))}">{h(vf.path.name)}</td>
+          <td class="filename has-tip" data-tip="{file_tip}">{h(vf.path.name)}</td>
         </tr>""")
 
     corrupt_rows = []
     for vf in corrupt:
+        corrupt_tip = h(f"Path: {str(vf.path)}\nSize: {fmt_size(vf.size_bytes)}\nReason: {vf.corrupt_reason}")
         corrupt_rows.append(f"""
         <tr class="corrupt-row">
-          <td colspan="3" class="filename" title="{h(str(vf.path))}">
+          <td colspan="3" class="filename has-tip" data-tip="{corrupt_tip}">
             <span class="corrupt-x">✗</span> {h(vf.path.name)}
           </td>
           <td colspan="4" class="dim">{h(vf.corrupt_reason)}</td>
@@ -783,7 +812,7 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
         </tr>""")
 
     grade_pills = "".join(
-        f'<span class="pill" style="background:{GRADE_CSS.get(g,"#6b7280")}">{g}: {grade_counts.get(g,0)}</span>'
+        f'<span class="pill has-tip" style="background:{GRADE_CSS.get(g,"#6b7280")}" data-tip="{h(GRADE_DESC.get(g,""))}">{g}: {grade_counts.get(g,0)}</span>'
         for g in grade_order if g in grade_counts
     )
 
@@ -840,6 +869,7 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
     font-size: .72rem;
     font-weight: 600;
     color: #111;
+    cursor: default;
   }}
   .pill-neutral {{ background: var(--border); color: var(--text); }}
   table {{
@@ -881,6 +911,7 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
     text-overflow: ellipsis;
     white-space: nowrap;
     color: #cbd5e1;
+    cursor: default;
   }}
   .mono {{ font-family: 'SF Mono', 'Fira Code', monospace; }}
   .dim {{ color: var(--dim); }}
@@ -898,21 +929,11 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: .04em;
+    cursor: default;
   }}
   .corrupt-row td {{ color: #ef4444; }}
   .corrupt-row .dim {{ color: #f87171; }}
   .corrupt-x {{ font-weight: 900; margin-right: .3rem; }}
-  .section-header {{
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: .6rem 1rem;
-    margin-bottom: .5rem;
-    display: flex;
-    align-items: center;
-    gap: .5rem;
-  }}
-  .warn-icon {{ color: #f59e0b; font-size: 1rem; }}
   input#search {{
     background: var(--surface);
     border: 1px solid var(--border);
@@ -922,14 +943,45 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
     font-size: .85rem;
     outline: none;
     width: 260px;
-    margin-bottom: .75rem;
   }}
   input#search:focus {{ border-color: var(--accent); }}
-  .toolbar {{ display: flex; align-items: center; gap: 1rem; margin-bottom: .5rem; }}
+  .toolbar {{ display: flex; align-items: center; gap: 1rem; margin-bottom: .75rem; flex-wrap: wrap; }}
+  label.filter-label {{
+    color: var(--dim);
+    font-size: .8rem;
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+    cursor: pointer;
+  }}
   footer {{ margin-top: 2rem; color: var(--dim); font-size: .75rem; }}
+  /* Tooltip */
+  .tooltip-box {{
+    position: fixed;
+    z-index: 9999;
+    background: #1e2130;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .6rem .85rem;
+    font-size: .78rem;
+    line-height: 1.6;
+    color: var(--text);
+    max-width: 420px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    box-shadow: 0 8px 32px rgba(0,0,0,.6);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .12s;
+  }}
+  .tooltip-box.visible {{ opacity: 1; }}
+  .has-tip {{ cursor: help; }}
+  thead th.has-tip {{ cursor: pointer; }}
+  .th-label {{ border-bottom: 1px dotted var(--dim); }}
 </style>
 </head>
 <body>
+<div class="tooltip-box" id="tt"></div>
 <h1>⚙ movie-scanner report</h1>
 <div class="meta">
   Directory: <code>{h(directory)}</code> &nbsp;·&nbsp;
@@ -940,37 +992,41 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
 <div class="summary">
   <div class="card"><div class="label">Files scanned</div><div class="value">{total_scanned}</div></div>
   <div class="card"><div class="label">Valid</div><div class="value" style="color:#22c55e">{len(good)}</div></div>
-  <div class="card"><div class="label">Corrupt</div><div class="value" style="color:{'#ef4444' if corrupt else '#22c55e'}">{len(corrupt)}</div></div>
+  <div class="card"><div class="label">Corrupt / unreadable</div><div class="value" style="color:{'#ef4444' if corrupt else '#22c55e'}">{len(corrupt)}</div></div>
   <div class="card"><div class="label">Total size</div><div class="value">{h(fmt_size(total_size + corrupt_size))}</div></div>
-  {'<div class="card"><div class="label">Avg norm-eff</div><div class="value mono">' + h(fmt_efficiency(avg_eff)) + '</div></div>' if avg_eff else ''}
-  {'<div class="card"><div class="label">Best encoded</div><div class="value" style="font-size:.8rem;color:#22c55e">' + h(best.path.name[:28]) + '</div></div>' if best else ''}
-  {'<div class="card"><div class="label">Worst encoded</div><div class="value" style="font-size:.8rem;color:#ef4444">' + h(worst.path.name[:28]) + '</div></div>' if worst else ''}
+  {'<div class="card has-tip" data-tip="Average codec-normalised bits per pixel across all valid files. Lower = more efficient library overall."><div class="label">Avg efficiency</div><div class="value mono">' + h(fmt_efficiency(avg_eff)) + '</div></div>' if avg_eff else ''}
+  {'<div class="card has-tip" data-tip="' + h("Most efficiently encoded file: uses the fewest bits per pixel relative to its codec.") + '"><div class="label">Best encoded</div><div class="value" style="font-size:.8rem;color:#22c55e">' + h(best.path.name[:28]) + '</div></div>' if best else ''}
+  {'<div class="card has-tip" data-tip="' + h("Most bloated file: uses the most bits per pixel relative to its codec. Good re-encode candidate.") + '"><div class="label">Worst encoded</div><div class="value" style="font-size:.8rem;color:#ef4444">' + h(worst.path.name[:28]) + '</div></div>' if worst else ''}
 </div>
 
-<h2>Grade breakdown</h2>
+<h2>Grade breakdown <span class="dim" style="font-size:.75rem;font-weight:400">(hover a grade for explanation)</span></h2>
 <div class="pills">{grade_pills}</div>
 
-<h2>Codecs</h2>
+<h2>Codecs in library</h2>
 <div class="pills">{codec_pills}</div>
 
-<h2>Valid Files ({len(good)})</h2>
+<h2>Files ({len(good)})</h2>
 <div class="toolbar">
   <input id="search" type="text" placeholder="Filter by filename…" oninput="filterTable(this.value)">
+  <label class="filter-label">
+    <input type="checkbox" id="poor-only" onchange="filterTable(document.getElementById('search').value)">
+    Bloated only (poor / terrible)
+  </label>
 </div>
 <table id="main-table">
   <thead>
     <tr>
-      <th class="num sorted" onclick="sortTable(0)">NormEff ↕</th>
-      <th class="num" onclick="sortTable(1)">RawEff ↕</th>
-      <th onclick="sortTable(2)">Codec ↕</th>
-      <th class="num" onclick="sortTable(3)">Factor ↕</th>
-      <th onclick="sortTable(4)">Grade ↕</th>
-      <th class="num" onclick="sortTable(5)">Pctile ↕</th>
+      <th class="num sorted has-tip" onclick="sortTable(0)" data-tip="Normalised Efficiency — codec-adjusted bits per pixel. Lower = better encoded.&#10;Accounts for how much more efficient modern codecs (HEVC, AV1) are vs H.264.&#10;H.264 is the baseline (factor 1.0). An HEVC file at the same NormEff as an H.264 file&#10;delivers significantly better picture quality per bit."><span class="th-label">NormEff ↕</span></th>
+      <th class="num has-tip" onclick="sortTable(1)" data-tip="Raw Efficiency — raw bits per pixel with NO codec adjustment.&#10;Useful for comparing files encoded with the same codec.&#10;Use NormEff for cross-codec comparisons."><span class="th-label">RawEff ↕</span></th>
+      <th class="has-tip" onclick="sortTable(2)" data-tip="Video codec used to encode this file."><span class="th-label">Codec ↕</span></th>
+      <th class="num has-tip" onclick="sortTable(3)" data-tip="Codec efficiency factor vs H.264 = 1.0.&#10;NormEff = RawEff ÷ Factor.&#10;Examples: AV1=2.5x  HEVC=1.8x  VP9=1.4x  H.264=1.0x  MPEG4=0.7x"><span class="th-label">Factor ↕</span></th>
+      <th class="has-tip" onclick="sortTable(4)" data-tip="Encoding quality grade — percentile rank within this library.&#10;excellent = best 20%  ·  good = 20–45%  ·  fair = 45–70%&#10;poor = 70–88%  ·  terrible = worst 12%"><span class="th-label">Grade ↕</span></th>
+      <th class="num has-tip" onclick="sortTable(5)" data-tip="Percentile rank (0 = most efficient, 100 = most bloated).&#10;Based on NormEff position within this library."><span class="th-label">Pctile ↕</span></th>
       <th class="num" onclick="sortTable(6)">Size ↕</th>
       <th onclick="sortTable(7)">Resolution ↕</th>
       <th class="num" onclick="sortTable(8)">Bitrate ↕</th>
       <th onclick="sortTable(9)">Duration ↕</th>
-      <th onclick="sortTable(10)">Filename ↕</th>
+      <th class="has-tip" onclick="sortTable(10)" data-tip="Hover the filename to see full path, audio tracks, FPS, and format."><span class="th-label">Filename ↕</span></th>
     </tr>
   </thead>
   <tbody id="main-tbody">
@@ -978,19 +1034,50 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
   </tbody>
 </table>
 
-{'<h2>⚠ Corrupt / Unreadable Files (' + str(len(corrupt)) + ')</h2><table><thead><tr><th colspan="3">Filename</th><th colspan="4">Reason</th><th colspan="4">Size</th></tr></thead><tbody>' + ''.join(corrupt_rows) + '</tbody></table>' if corrupt else ''}
+{'<h2>⚠ Corrupt / Unreadable Files (' + str(len(corrupt)) + ')</h2><p style="color:var(--dim);font-size:.8rem;margin-bottom:.75rem">These files could not be read by ffprobe. Hover the filename for the full path and reason.</p><table><thead><tr><th colspan="3">Filename</th><th colspan="4">Reason</th><th colspan="4">Size</th></tr></thead><tbody>' + ''.join(corrupt_rows) + '</tbody></table>' if corrupt else ''}
 
 <footer>
-  movie-scanner &nbsp;·&nbsp; NormEff = codec-normalised bits/pixel (H.264 baseline, lower = better) &nbsp;·&nbsp;
-  Grades are percentile-based relative to this library.
+  movie-scanner &nbsp;·&nbsp;
+  <strong>NormEff</strong> = codec-normalised bits/pixel (H.264 baseline, lower = better) &nbsp;·&nbsp;
+  <strong>Grades</strong> are percentile-based relative to this library, not fixed thresholds.
 </footer>
 
 <script>
-  // Client-side sort
+  // ── Tooltip ──────────────────────────────────────────────────────────────
+  const tt = document.getElementById('tt');
+  let ttVisible = false;
+
+  document.addEventListener('mouseover', e => {{
+    const el = e.target.closest('.has-tip');
+    if (!el) return;
+    const text = el.dataset.tip;
+    if (!text) return;
+    tt.textContent = text;
+    tt.classList.add('visible');
+    ttVisible = true;
+  }});
+
+  document.addEventListener('mouseout', e => {{
+    if (!e.target.closest('.has-tip')) return;
+    tt.classList.remove('visible');
+    ttVisible = false;
+  }});
+
+  document.addEventListener('mousemove', e => {{
+    if (!ttVisible) return;
+    const pad = 16;
+    let x = e.clientX + pad, y = e.clientY + pad;
+    const bw = tt.offsetWidth, bh = tt.offsetHeight;
+    if (x + bw > window.innerWidth  - pad) x = e.clientX - bw - pad;
+    if (y + bh > window.innerHeight - pad) y = e.clientY - bh - pad;
+    tt.style.left = x + 'px';
+    tt.style.top  = y + 'px';
+  }});
+
+  // ── Client-side sort ──────────────────────────────────────────────────────
   let sortCol = 0, sortAsc = true;
   const numCols = new Set([0,1,3,5,8]);   // pure numeric cols (not Size col 6)
 
-  // Convert a size string like "2.50 GB", "341.2 MB", "512 KB" to bytes for sorting
   function sizeToBytes(s) {{
     const m = s.match(/(\\d+\\.?\\d*)\\s*(GB|MB|KB|B)/i);
     if (!m) return 0;
@@ -1001,6 +1088,17 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
 
   function cellVal(row, col) {{
     return row.cells[col]?.innerText.trim() ?? '';
+  }}
+
+  function filterTable(query) {{
+    const q     = query.toLowerCase();
+    const poor  = document.getElementById('poor-only').checked;
+    Array.from(document.getElementById('main-tbody').rows).forEach(row => {{
+      const name = cellVal(row, 10).toLowerCase();
+      const grade = row.className.replace('grade-', '');
+      const isBloated = grade === 'poor' || grade === 'terrible';
+      row.style.display = (name.includes(q) && (!poor || isBloated)) ? '' : 'none';
+    }});
   }}
 
   function sortTable(col) {{
@@ -1014,7 +1112,6 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
       if (av === 'N/A') av = sortAsc ? '99999' : '-1';
       if (bv === 'N/A') bv = sortAsc ? '99999' : '-1';
       if (col === 6) {{
-        // Size column: unit-aware sort
         return sortAsc ? sizeToBytes(av) - sizeToBytes(bv) : sizeToBytes(bv) - sizeToBytes(av);
       }}
       if (numCols.has(col)) {{
@@ -1030,14 +1127,6 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
       th.classList.toggle('sorted', i === col);
     }});
   }}
-
-  function filterTable(query) {{
-    const q = query.toLowerCase();
-    Array.from(document.getElementById('main-tbody').rows).forEach(row => {{
-      const name = cellVal(row, 10).toLowerCase();
-      row.style.display = name.includes(q) ? '' : 'none';
-    }});
-  }}
 </script>
 </body>
 </html>
@@ -1045,7 +1134,7 @@ def export_html(good: List["VideoFile"], corrupt: List["VideoFile"],
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
-    print(GREEN(f"✓ HTML exported: {path}"))
+    print(GREEN(f"✓ HTML report: {path}"))
 
 
 def export_txt(good: List["VideoFile"], corrupt: List["VideoFile"],
@@ -1208,7 +1297,9 @@ Codec factors (vs H.264 = 1.0):  AV1=2.5  HEVC=1.8  VP9=1.4  MPEG4=0.7  MPEG2=0.
                    help="Sort descending")
     p.add_argument("--csv", metavar="FILE", help="Export results to CSV")
     p.add_argument("--txt", metavar="FILE", help="Export results to plain text")
-    p.add_argument("--html", metavar="FILE", help="Export results as a self-contained HTML report")
+    p.add_argument("--html", metavar="FILE", nargs="?", const="",
+                   help="Export results as a self-contained HTML report. "
+                        "Omit FILE to auto-name report.html in the scanned directory.")
     p.add_argument("--no-table", action="store_true",
                    help="Suppress terminal table")
     p.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4,
@@ -1314,8 +1405,12 @@ def main():
         export_csv(good + corrupt, args.csv)
     if args.txt:
         export_txt(good, corrupt, args.txt, args.sort, args.desc)
-    if args.html:
-        export_html(good, corrupt, args.html, args.sort, args.desc,
+
+    # HTML: auto-generate if --html was given with no filename, or
+    # --html FILE was given explicitly.  Default (no --html flag) = no HTML.
+    if args.html is not None:
+        html_path = args.html if args.html else str(directory / "report.html")
+        export_html(good, corrupt, html_path, args.sort, args.desc,
                     str(directory), len(files))
 
     sys.exit(2 if corrupt else 0)
