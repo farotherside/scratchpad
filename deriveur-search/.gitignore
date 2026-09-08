@@ -1,0 +1,8 @@
+# Fetched HTML, previous-run state, and generated output are all reproducible.
+cache/
+state/
+out/
+.run.lock/
+__pycache__/
+*.pyc
+.DS_Store
