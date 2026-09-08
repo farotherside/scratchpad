@@ -180,8 +180,8 @@ def _tokens(rec):
     for t in re.findall(r"[a-z]+|\d+", parts):
         if t in _STOP or len(t) < 2:
             continue
-        if t.isdigit() and (len(t) > 3 or int(t) > 100):
-            continue          # years and prices, not model numbers
+        if t.isdigit() and (len(t) > 3 or int(t) > 100 or int(t) == 0):
+            continue          # years, prices and the "000" of "330 000"
         toks.add(t)
     return toks
 
@@ -203,7 +203,9 @@ def link_duplicates(listings):
             for other in g:
                 otoks = _tokens(other)
                 overlap = toks & otoks
-                if not overlap or len(overlap) < 2:
+                # Two boats are only the same hull if they share a real word,
+                # not merely a pair of digits from their prices.
+                if len(overlap) < 2 or not any(t.isalpha() for t in overlap):
                     continue
                 oy, ol = other.get("year"), other.get("loa_m")
                 if year and oy and abs(year - oy) > 1:

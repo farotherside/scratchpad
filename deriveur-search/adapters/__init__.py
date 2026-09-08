@@ -11,3 +11,13 @@ import importlib
 
 def load(name):
     return importlib.import_module(f"adapters.{name}")
+
+
+def detail_cap(site_cfg):
+    """Per-site ceiling on detail fetches per run.
+
+    Some boards give us no way to filter server-side, so we crawl them a slice
+    at a time. Because fetches are cached, successive runs reach further in and
+    steady state costs only the genuinely new listings.
+    """
+    return site_cfg.get("max_details", 10 ** 9)

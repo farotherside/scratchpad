@@ -87,7 +87,31 @@ INTERIOR = [
 ALUMINIUM = r"alumini?um|alu\b|aluminio|aluminiu|aluminium|\balu\.|aluminum"
 NOT_ALUMINIUM = r"\b(grp|frp|fibreglass|fiberglass|polyester|composite|carbon|" \
                 r"\bsteel\b|acier|stahl|staal|\bwood\b|\bbois\b|ferro-?cement|" \
-                r"sandwich|epoxy glass)\b"
+                r"sandwich|epoxy glass|strip.?planking?|cold.?moul\w*|contreplaque)"
+
+# Every sailboat has an aluminium mast, boom and hatches, so a bare mention of
+# the word proves nothing. Infer an aluminium HULL only when the word sits next
+# to a hull term, or the boat is from a yard that builds nothing else.
+_HULL_WORD = (r"coque|hull|bord[eé]|carene|carène|construction|materiau|"
+              r"mat[eé]riau|material|romp|rumpf|casco|structure|plating|"
+              r"chantier|built in|constructed")
+_ALU_YARDS = (r"\balubat\b|\bovni\b|\bboreal\b|\ballures\b|\bgarcia\b|"
+              r"\bmeta\b|\bfutuna\b|km yacht|bestevaer|\bcigale\b|\bjfa\b|"
+              r"\bpatago\b|\bstrongall\b|\balliage\b|\bagba\b|\bpassoa\b|"
+              r"\bchatam\b|\bcrozet\b|van de stadt|berckemeyer|aluyacht|"
+              r"\bwesthinder\b|\bhermine\b|dix design|\bnordia\b")
+
+
+def aluminium_hull_evidence(text):
+    """Return (bool, snippet). Aluminium must be tied to the hull, not the rig."""
+    for m in re.finditer(ALUMINIUM, text):
+        window = text[max(0, m.start() - 90):m.end() + 90]
+        if re.search(_HULL_WORD, window):
+            return True, "…" + re.sub(r"\s+", " ", window).strip() + "…"
+    m = re.search(_ALU_YARDS, text)
+    if m:
+        return True, f"built by {m.group(0)}, a yard that builds aluminium hulls"
+    return False, None
 
 
 def _scan(text, rules):
@@ -146,6 +170,16 @@ def extract_plate_mm(text):
     return hits
 
 
+def parse_material(mat):
+    for pat, name in ((r"\bsteel\b|acier|stahl|staal", "steel"),
+                      (r"grp|frp|fibreglass|fiberglass|polyester|composite", "GRP"),
+                      (r"\bwood\b|\bbois\b|timber|epoxy", "wood"),
+                      (r"ferro", "ferrocement"), (r"carbon", "carbon")):
+        if re.search(pat, mat):
+            return name
+    return mat[:24] or "unknown"
+
+
 def _rig_from(text):
     for pattern, _w, label in RIG:
         if re.search(pattern, text):
@@ -166,18 +200,26 @@ def assess(listing, cfg):
 
     reasons_fail, warnings = [], []
 
-    # ---- Hard filter: hull material -------------------------------------
+    # ---- Hard filter: hull material ---------------------------------------
+    # Aluminium is the hardest of the hard criteria, so it must be positively
+    # established -- from the material field or from the listing text. Absence
+    # of any mention is treated as failure, not as "unknown": otherwise every
+    # barge and GRP boat with an unlabelled spec sheet lands on the shortlist.
     mat = _norm(listing.get("hull_material") or "")
-    material_known = bool(mat)
-    if material_known:
-        is_alu = bool(re.search(ALUMINIUM, mat))
-    else:
-        is_alu = bool(re.search(ALUMINIUM, text))
-        material_known = is_alu or bool(re.search(NOT_ALUMINIUM, text))
-    if material_known and not is_alu:
-        reasons_fail.append("hull is not aluminium")
-    elif not material_known:
-        warnings.append("hull material not stated — verify")
+    field_says_alu = bool(mat and re.search(ALUMINIUM, mat))
+    field_says_other = bool(mat and re.search(NOT_ALUMINIUM, mat))
+    text_says_alu, alu_snippet = aluminium_hull_evidence(text)
+    is_alu = field_says_alu or (not field_says_other and text_says_alu)
+    material_known = bool(mat) or text_says_alu or bool(re.search(NOT_ALUMINIUM, text))
+
+    if field_says_other:
+        reasons_fail.append(f"hull is {parse_material(mat)}, not aluminium")
+    elif not is_alu:
+        reasons_fail.append("aluminium hull not established anywhere in the listing")
+    elif not field_says_alu:
+        warnings.append(
+            "aluminium hull inferred from the text, not a spec field — confirm "
+            f"with the broker. Evidence: {alu_snippet}")
 
     # ---- Hard filter: length --------------------------------------------
     loa_m = listing.get("loa_m")

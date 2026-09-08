@@ -76,13 +76,54 @@ English, Dutch and German. Add a phrase and its weight to teach it a new signal.
 
 ## Sources
 
-Working: `gaelnautisme`, `ayc`, `owenclarke`.
+| source | what it adds |
+|---|---|
+| `gaelnautisme` | French aluminium specialist; the richest single source of *dériveur intégral* boats |
+| `ayc` | French broker; Ovni/Alubat, Meta, Patago, Chatam |
+| `devalk` | Large EU brokerage; index cards allow pre-filtering, detail pages expose `dataLayer` + JSON-LD |
+| `owenclarke` | UK explorer/high-latitude specialist |
+| `apolloduck` | International classifieds, brokerage *and* private sales |
+| `hisseetoh` | French sailing community — owner sales that never reach a brokerage |
+| `mail` | Saved-search alert emails (disabled until configured) |
 
-Blocked from this machine: `yachtworld`, `yachtfocus` (Cloudflare) and
-`boat24` (WAF 403, though its robots.txt permits the path). They stay in
-`config.json` using the `generic_blocked` adapter, which makes one polite
-request per run and records the outcome — so `run_report.json` tells you if
-your host's IP fares better. It does not attempt to defeat bot protection.
+**Blocked:** `yachtworld`, `yachtfocus` (Cloudflare) and `boat24` (WAF). The
+block is client fingerprinting, not IP reputation — an automated browser is
+refused too, while a hand-driven one works. They stay in `config.json` using
+the `generic_blocked` adapter, which makes one polite request per run and
+records the outcome, so `run_report.json` tells you if anything changes.
+**No attempt is made to defeat bot protection.** Recover those sources through
+their saved-search email alerts instead — see below.
+
+## Email alerts (recovering the blocked sites)
+
+Create saved searches on YachtWorld/YachtFocus/boat24 in your browser and point
+the alerts at a mailbox this can read. That is the sanctioned route, and it is
+faster than scraping: you hear when a boat lists, not up to a day later.
+
+Set `"enabled": true` on the `mail` site in `config.json`, then either read a
+local mailbox:
+
+    "maildir": "~/Maildir/.Boats/new"     (or "mbox": "~/mail/boats")
+
+or IMAP, with credentials only ever in the environment:
+
+    export YACHTSCOUT_IMAP_HOST=imap.example.com
+    export YACHTSCOUT_IMAP_USER=you@example.com
+    export YACHTSCOUT_IMAP_PASS='an app-specific password'
+    export YACHTSCOUT_IMAP_FOLDER=Boats
+
+The mailbox is opened **read-only** and never modified. Alert formats vary by
+sender, so extraction is best-effort: records are tagged `untrusted_source` and
+`needs_manual_open`, carry the link and whatever price/year/length appears near
+it, and are meant as a prompt to go look — not as a full spec sheet.
+
+## Crawl budgets
+
+Sites with no usable server-side filter are crawled a slice at a time via
+`max_details`. Because fetches are cached for 20 h, successive runs reach
+further in and steady state costs only genuinely new listings. De Valk is the
+opposite case: its index cards carry material, size, year and price, so a
+typical run pre-filters ~500 boats away and fetches under ten pages.
 
 Adding a source: write `adapters/<name>.py` exposing
 `collect(site_cfg, ctx) -> (listings, report)` and add it to `config.json`.

@@ -9,6 +9,7 @@ The later 'Inventaire' block repeats labels like 'Modèle' for the *engine*, so
 spec scanning stops at 'Inventaire'.
 """
 import re
+import adapters
 import parse
 
 BASE = "https://www.ayc-yachtbroker.com"
@@ -62,7 +63,13 @@ def collect(site_cfg, ctx):
     report["index_count"] = len(stubs)
 
     out = []
+    cap = adapters.detail_cap(site_cfg)
     for stub in stubs:
+        if len(out) >= cap:
+            report["errors"].append(
+                f"per-site cap of {cap} detail fetches reached; the rest are "
+                f"cached for the next run")
+            break
         if not ctx.budget_ok():
             report["errors"].append("detail-fetch budget exhausted; remaining boats deferred")
             break

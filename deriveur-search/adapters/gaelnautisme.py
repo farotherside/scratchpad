@@ -4,6 +4,7 @@ Spec labels are French; 'deriveur integral' in the Catégorie field is the
 single most valuable signal any of these sites gives us.
 """
 import re
+import adapters
 import parse
 
 BASE = "https://gaelnautisme.com/"
@@ -61,7 +62,13 @@ def collect(site_cfg, ctx):
         report["index_count"] = len(listings)
 
     out = []
+    cap = adapters.detail_cap(site_cfg)
     for stub in listings:
+        if len(out) >= cap:
+            report["errors"].append(
+                f"per-site cap of {cap} detail fetches reached; the rest are "
+                f"cached for the next run")
+            break
         if not ctx.budget_ok():
             report["errors"].append("detail-fetch budget exhausted; remaining boats deferred to next run")
             break
