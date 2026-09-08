@@ -1,0 +1,67 @@
+{
+  "_comment": "YachtScout config. Edit criteria here; the scraper reads this at runtime. Set the YACHTSCOUT_CONTACT env var to put a real reply address in the User-Agent.",
+
+  "output_dir": "out",
+  "state_dir": "state",
+  "cache_dir": "cache",
+  "cache_ttl_hours": 20,
+
+  "http": {
+    "user_agent": "YachtScout/1.0 (personal boat search; contact: $YACHTSCOUT_CONTACT)",
+    "delay_seconds": 4.0,
+    "jitter_seconds": 2.0,
+    "timeout_seconds": 45,
+    "max_retries": 2,
+    "max_detail_fetches_per_run": 250
+  },
+
+  "criteria": {
+    "length_ft": { "min": 47, "max": 72, "tolerance_ft": 1.5 },
+    "year": { "max_age_years": 30 },
+    "price_usd": { "min": 100000, "max": 800000 },
+    "hull_material": { "required": "aluminium" },
+    "hull_plate_mm": { "reject_below": 6, "weak_below": 8, "good_at": 10, "excellent_at": 12 },
+    "interior": { "min_cabins": 3, "target_crew": 7, "min_heads": 1, "preferred_heads": 2 }
+  },
+
+  "import_to_eastern_canada": {
+    "duty_rate": 0.095,
+    "provincial_and_federal_tax_rate": 0.15,
+    "_order": "duty applied to purchase price, then tax applied to (price + duty)"
+  },
+
+  "fx_to_usd": {
+    "_comment": "Static approximate rates. Update occasionally; only used for coarse price filtering.",
+    "USD": 1.0, "EUR": 1.08, "GBP": 1.27, "CAD": 0.73,
+    "AUD": 0.66, "NZD": 0.60, "CHF": 1.13, "SEK": 0.095,
+    "NOK": 0.093, "DKK": 0.145, "XPF": 0.00905
+  },
+
+  "regions": {
+    "easy":   ["FR","GB","NL","DE","IT","ES","PT","BE","SE","NO","DK","FI","GR","HR","MT","IE","CH","US","CA","VG","AG","GP","MQ","BS","SX","LC","GD","TT","PA","MX"],
+    "remote": ["AU","NZ","PF","NC","ZA","TH","MY","ID","PH","JP","CL","AR","BR","UY"]
+  },
+
+  "sites": [
+    { "id": "gaelnautisme",  "enabled": true,  "adapter": "gaelnautisme",
+      "index_urls": ["https://gaelnautisme.com/liste-voilier.asp"] },
+
+    { "id": "ayc",           "enabled": true,  "adapter": "ayc",
+      "index_urls": ["https://www.ayc-yachtbroker.com/voiliers"] },
+
+    { "id": "owenclarke",    "enabled": true,  "adapter": "owenclarke",
+      "index_urls": ["https://www.owenclarkedesign.com/aluminium-centreboard-and-explorer-yacht-brokerage"] },
+
+    { "id": "yachtworld",    "enabled": true,  "adapter": "generic_blocked",
+      "note": "Cloudflare-blocked from datacenter IPs as of 2026-09-08. Left enabled so the run report tells you if your host's IP fares better.",
+      "index_urls": ["https://www.yachtworld.com/boats-for-sale/condition-used/type-sail/length-47,72/price-100000,800000/hull-aluminum/sort-updated:desc/"] },
+
+    { "id": "yachtfocus",    "enabled": true,  "adapter": "generic_blocked",
+      "note": "Cloudflare-blocked from datacenter IPs as of 2026-09-08.",
+      "index_urls": ["https://www.yachtfocus.com/en/boats/condition-used/type-sailboats/length-15,20/price-100000,800000/hull-aluminium/"] },
+
+    { "id": "boat24",        "enabled": true,  "adapter": "generic_blocked",
+      "note": "WAF 403 from datacenter IPs as of 2026-09-08, though robots.txt permits the path.",
+      "index_urls": ["https://www.boat24.com/en/usedboats/?cat=1&lge_max=20&lge_min=15&mat=244&sort=datdesc"] }
+  ]
+}
