@@ -27,6 +27,11 @@ import report            # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+if sys.version_info < (3, 7):       # subprocess.run(capture_output=...) is 3.7+
+    sys.exit(f"YachtScout needs Python 3.7 or newer (this is "
+             f"{sys.version_info.major}.{sys.version_info.minor}). "
+             f"Try another interpreter, e.g. PYTHON=python3.11 ./run.sh")
+
 
 class Context:
     def __init__(self, cfg, args):

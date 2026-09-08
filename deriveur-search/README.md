@@ -4,14 +4,18 @@ Scrapes aluminium expedition sailboat listings into a JSON database, detects
 changes between runs, and publishes the result to a web-visible directory for
 a downstream Claude to read.
 
-**No dependencies.** Python 3.6+ standard library, shelling out to `curl`.
+**No dependencies.** Python 3.7+ standard library, shelling out to `curl`.
 Nothing to `pip install`, no root needed — built for a shared shell account.
 
 ## Install
 
     git clone https://github.com/farotherside/scratchpad.git
     cd scratchpad/deriveur-search
+    python3 -V && command -v curl        # need Python >= 3.7 and curl
     python3 yachtscout.py --limit 5      # smoke test, ~5 requests
+
+If the host's `python3` is older than 3.7, look for `python3.8`/`python3.11` on
+the box and use `PYTHON=python3.11 ./run.sh`.
 
 ## Run
 
