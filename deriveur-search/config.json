@@ -1,11 +1,9 @@
 {
   "_comment": "YachtScout config. Edit criteria here; the scraper reads this at runtime. Set the YACHTSCOUT_CONTACT env var to put a real reply address in the User-Agent.",
-
   "output_dir": "out",
   "state_dir": "state",
   "cache_dir": "cache",
   "cache_ttl_hours": 20,
-
   "http": {
     "user_agent": "YachtScout/1.0 (personal boat search; contact: $YACHTSCOUT_CONTACT)",
     "delay_seconds": 4.0,
@@ -14,54 +12,202 @@
     "max_retries": 2,
     "max_detail_fetches_per_run": 250
   },
-
   "criteria": {
-    "length_ft": { "min": 47, "max": 72, "tolerance_ft": 1.5 },
-    "year": { "max_age_years": 30 },
-    "price_usd": { "min": 100000, "max": 800000 },
-    "hull_material": { "required": "aluminium" },
-    "hull_plate_mm": { "reject_below": 6, "weak_below": 8, "good_at": 10, "excellent_at": 12 },
-    "interior": { "min_cabins": 3, "target_crew": 7, "min_heads": 1, "preferred_heads": 2 }
+    "length_ft": {
+      "min": 44,
+      "max": 72,
+      "tolerance_ft": 1.5,
+      "_comment": "Floor is 44ft, below the 47ft the interior really needs, because the best beachable aluminium hulls (Ovni 435/450, Boreal 44, Crozet 46, Patago 45) sit just under it. Interior scoring and the cabins/heads fields do the real filtering."
+    },
+    "year": {
+      "max_age_years": 30
+    },
+    "price_usd": {
+      "min": 100000,
+      "max": 800000
+    },
+    "hull_material": {
+      "required": "aluminium"
+    },
+    "hull_plate_mm": {
+      "reject_below": 6,
+      "weak_below": 8,
+      "good_at": 10,
+      "excellent_at": 12
+    },
+    "interior": {
+      "min_cabins": 3,
+      "target_crew": 7,
+      "min_heads": 1,
+      "preferred_heads": 2
+    }
   },
-
   "import_to_eastern_canada": {
     "duty_rate": 0.095,
     "provincial_and_federal_tax_rate": 0.15,
     "_order": "duty applied to purchase price, then tax applied to (price + duty)"
   },
-
   "fx_to_usd": {
     "_comment": "Static approximate rates. Update occasionally; only used for coarse price filtering.",
-    "USD": 1.0, "EUR": 1.08, "GBP": 1.27, "CAD": 0.73,
-    "AUD": 0.66, "NZD": 0.60, "CHF": 1.13, "SEK": 0.095,
-    "NOK": 0.093, "DKK": 0.145, "XPF": 0.00905
+    "USD": 1.0,
+    "EUR": 1.08,
+    "GBP": 1.27,
+    "CAD": 0.73,
+    "AUD": 0.66,
+    "NZD": 0.6,
+    "CHF": 1.13,
+    "SEK": 0.095,
+    "NOK": 0.093,
+    "DKK": 0.145,
+    "XPF": 0.00905
   },
-
   "regions": {
-    "easy":   ["FR","GB","NL","DE","IT","ES","PT","BE","SE","NO","DK","FI","GR","HR","MT","IE","CH","US","CA","VG","AG","GP","MQ","BS","SX","LC","GD","TT","PA","MX"],
-    "remote": ["AU","NZ","PF","NC","ZA","TH","MY","ID","PH","JP","CL","AR","BR","UY"]
+    "easy": [
+      "FR",
+      "GB",
+      "NL",
+      "DE",
+      "IT",
+      "ES",
+      "PT",
+      "BE",
+      "SE",
+      "NO",
+      "DK",
+      "FI",
+      "GR",
+      "HR",
+      "MT",
+      "IE",
+      "CH",
+      "US",
+      "CA",
+      "VG",
+      "AG",
+      "GP",
+      "MQ",
+      "BS",
+      "SX",
+      "LC",
+      "GD",
+      "TT",
+      "PA",
+      "MX"
+    ],
+    "remote": [
+      "AU",
+      "NZ",
+      "PF",
+      "NC",
+      "ZA",
+      "TH",
+      "MY",
+      "ID",
+      "PH",
+      "JP",
+      "CL",
+      "AR",
+      "BR",
+      "UY"
+    ]
   },
-
   "sites": [
-    { "id": "gaelnautisme",  "enabled": true,  "adapter": "gaelnautisme",
-      "index_urls": ["https://gaelnautisme.com/liste-voilier.asp"] },
-
-    { "id": "ayc",           "enabled": true,  "adapter": "ayc",
-      "index_urls": ["https://www.ayc-yachtbroker.com/voiliers"] },
-
-    { "id": "owenclarke",    "enabled": true,  "adapter": "owenclarke",
-      "index_urls": ["https://www.owenclarkedesign.com/aluminium-centreboard-and-explorer-yacht-brokerage"] },
-
-    { "id": "yachtworld",    "enabled": true,  "adapter": "generic_blocked",
-      "note": "Cloudflare-blocked from datacenter IPs as of 2026-09-08. Left enabled so the run report tells you if your host's IP fares better.",
-      "index_urls": ["https://www.yachtworld.com/boats-for-sale/condition-used/type-sail/length-47,72/price-100000,800000/hull-aluminum/sort-updated:desc/"] },
-
-    { "id": "yachtfocus",    "enabled": true,  "adapter": "generic_blocked",
-      "note": "Cloudflare-blocked from datacenter IPs as of 2026-09-08.",
-      "index_urls": ["https://www.yachtfocus.com/en/boats/condition-used/type-sailboats/length-15,20/price-100000,800000/hull-aluminium/"] },
-
-    { "id": "boat24",        "enabled": true,  "adapter": "generic_blocked",
-      "note": "WAF 403 from datacenter IPs as of 2026-09-08, though robots.txt permits the path.",
-      "index_urls": ["https://www.boat24.com/en/usedboats/?cat=1&lge_max=20&lge_min=15&mat=244&sort=datdesc"] }
+    {
+      "id": "gaelnautisme",
+      "enabled": true,
+      "adapter": "gaelnautisme",
+      "index_urls": [
+        "https://gaelnautisme.com/liste-voilier.asp"
+      ],
+      "max_details": 120
+    },
+    {
+      "id": "ayc",
+      "enabled": true,
+      "adapter": "ayc",
+      "index_urls": [
+        "https://www.ayc-yachtbroker.com/voiliers"
+      ],
+      "max_details": 60
+    },
+    {
+      "id": "owenclarke",
+      "enabled": true,
+      "adapter": "owenclarke",
+      "index_urls": [
+        "https://www.owenclarkedesign.com/aluminium-centreboard-and-explorer-yacht-brokerage"
+      ]
+    },
+    {
+      "id": "devalk",
+      "enabled": true,
+      "adapter": "devalk",
+      "note": "Major EU brokerage; index cards allow pre-filtering, detail pages expose dataLayer + JSON-LD.",
+      "max_index_pages": 12,
+      "index_urls": [
+        "https://www.devalk.nl/en/Yachts-for-sale.html"
+      ],
+      "max_details": 40
+    },
+    {
+      "id": "apolloduck",
+      "enabled": true,
+      "adapter": "apolloduck",
+      "note": "International classifieds; brokerage and private sales. No working server-side filters, so it is crawled a slice per run under max_details and coverage accumulates via the cache.",
+      "page_size": 50,
+      "max_index_pages": 6,
+      "index_urls": [
+        "https://www.apolloduck.com/boats-for-sale/sail"
+      ],
+      "max_details": 40
+    },
+    {
+      "id": "hisseetoh",
+      "enabled": true,
+      "adapter": "hisseetoh",
+      "note": "French sailing community classifieds — private owner sales.",
+      "max_index_pages": 5,
+      "index_urls": [
+        "https://www.hisse-et-oh.com/av/sailboats"
+      ],
+      "max_details": 30
+    },
+    {
+      "id": "yachtworld",
+      "enabled": true,
+      "adapter": "generic_blocked",
+      "note": "Cloudflare-blocked from datacenter IPs as of 2026-09-08. Blocked by client fingerprinting, not IP — an automated browser is refused too. Recover this source via its saved-search email alerts through the 'mail' site below.",
+      "index_urls": [
+        "https://www.yachtworld.com/boats-for-sale/condition-used/type-sail/length-47,72/price-100000,800000/hull-aluminum/sort-updated:desc/"
+      ]
+    },
+    {
+      "id": "yachtfocus",
+      "enabled": true,
+      "adapter": "generic_blocked",
+      "note": "Cloudflare-blocked from datacenter IPs as of 2026-09-08. Blocked by client fingerprinting, not IP — an automated browser is refused too. Recover this source via its saved-search email alerts through the 'mail' site below.",
+      "index_urls": [
+        "https://www.yachtfocus.com/en/boats/condition-used/type-sailboats/length-15,20/price-100000,800000/hull-aluminium/"
+      ]
+    },
+    {
+      "id": "boat24",
+      "enabled": true,
+      "adapter": "generic_blocked",
+      "note": "WAF 403 from datacenter IPs as of 2026-09-08, though robots.txt permits the path. Blocked by client fingerprinting, not IP — an automated browser is refused too. Recover this source via its saved-search email alerts through the 'mail' site below.",
+      "index_urls": [
+        "https://www.boat24.com/en/usedboats/?cat=1&lge_max=20&lge_min=15&mat=244&sort=datdesc"
+      ]
+    },
+    {
+      "id": "mail",
+      "enabled": false,
+      "adapter": "mailbox",
+      "note": "Saved-search alert emails from the sites that refuse scraping. Set YACHTSCOUT_IMAP_* env vars (or 'maildir'/'mbox' here) and flip enabled to true.",
+      "folder": "INBOX",
+      "lookback_days": 30,
+      "max_messages": 200,
+      "index_urls": []
+    }
   ]
 }

@@ -35,19 +35,30 @@ def clean(s):
 
 # ---------------------------------------------------------------- numbers ---
 
-def _to_float(s):
-    """Parse a number that may use ',' or '.' as decimal separator."""
+def _to_float(s, money=False):
+    """Parse a number that may use ',' or '.' as decimal or thousands separator.
+
+    `money=True` resolves the genuinely ambiguous case in favour of thousands:
+    European brokers write 458,000 as "458.000", and reading that as 458 would
+    silently drop a boat out of the price band.
+    """
     if s is None:
         return None
-    s = str(s).strip().replace(" ", "").replace(" ", "").replace("'", "")
+    s = str(s).strip()
+    for ch in (" ", "\u00a0", "\u202f", "\u2009", "'"):
+        s = s.replace(ch, "")
     if not s:
         return None
     if "," in s and "." in s:
         # whichever comes last is the decimal separator
         s = s.replace(",", "") if s.rindex(".") > s.rindex(",") else s.replace(".", "").replace(",", ".")
-    elif "," in s:
-        frac = s.rsplit(",", 1)[1]
-        s = s.replace(",", ".") if len(frac) in (1, 2) else s.replace(",", "")
+    elif "," in s or "." in s:
+        sep = "," if "," in s else "."
+        head, _, frac = s.rpartition(sep)
+        if s.count(sep) > 1 or len(frac) == 3 and (money or head.count(sep) or len(head) <= 3):
+            s = s.replace(sep, "")            # thousands grouping
+        else:
+            s = s.replace(sep, ".")           # decimal
     try:
         return float(s)
     except ValueError:
@@ -151,8 +162,13 @@ def parse_price(text, default_currency=None):
         tax = "tax_unpaid"
 
     best = None
-    for m in re.finditer(r"\d[\d\s.,' ]{2,}\d|\b\d{4,}\b", t):
-        v = _to_float(m.group(0))
+    # A proper number grammar, not a greedy run of digits-and-separators:
+    # "EUR 298,000, 13.80 m" must read as 298000, never as 29,800,013.
+    money_re = re.compile(
+        r"\d{1,3}(?:[\u00a0\u202f .,']\d{3})+(?:[.,]\d{1,2})?"   # 1 234 567,89
+        r"|\b\d{4,9}(?:[.,]\d{1,2})?\b")                        # 1234567.89
+    for m in money_re.finditer(t):
+        v = _to_float(m.group(0), money=True)
         if v is None:
             continue
         if 5000 <= v <= 50_000_000 and (best is None or v > best):
@@ -214,11 +230,21 @@ def extract_label_value_pairs(raw_html):
     return pairs
 
 
+def _label_key(s):
+    """'Modèle :' / 'Length over all:' -> 'modèle' / 'length over all'."""
+    return re.sub(r"\s*:\s*$", "", str(s).strip().lower()).strip()
+
+
 def pairs_from_lines(text, labels):
-    """For sites that render specs as 'Label\\nValue' line pairs."""
+    """For sites that render specs as a 'Label:' line then a value line.
+
+    Apollo Duck, Hisse et Oh and several brokers all do this, and some put a
+    space before the colon ('Modèle :'), so labels are normalised rather than
+    merely rstripped.
+    """
     out = {}
     lines = [l.strip() for l in text.split("\n") if l.strip()]
-    lowered = [l.lower().rstrip(":") for l in lines]
+    lowered = [_label_key(l) for l in lines]
     for i, lab in enumerate(lowered):
         if lab in labels and i + 1 < len(lines):
             out.setdefault(lab, lines[i + 1])

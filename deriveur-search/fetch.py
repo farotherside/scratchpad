@@ -72,7 +72,7 @@ def robots_allows(url, user_agent):
             out = subprocess.run(
                 ["curl", "-sS", "-A", user_agent, "--max-time", "20", "-L",
                  origin + "/robots.txt"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, errors="replace", timeout=30,
             )
             text = out.stdout or ""
             if "<html" in text[:400].lower() or not text.strip():
@@ -129,7 +129,10 @@ def fetch(url, cfg, cache_dir, ttl_hours, force=False):
             url,
         ]
         try:
+            # errors="replace": broker pages are served in a zoo of encodings
+            # and a single stray byte must not abort the whole run.
             out = subprocess.run(cmd, capture_output=True, text=True,
+                                 errors="replace",
                                  timeout=cfg.get("timeout_seconds", 45) + 15)
         except subprocess.TimeoutExpired:
             last_err = "curl timeout"
