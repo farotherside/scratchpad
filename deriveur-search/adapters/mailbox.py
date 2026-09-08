@@ -38,6 +38,7 @@ KNOWN = [
     (re.compile(r"(?i)boats\.com/[^\s\"'<>]+"), "boatsdotcom"),
     (re.compile(r"(?i)theyachtmarket\.com/[^\s\"'<>]+"), "theyachtmarket"),
     (re.compile(r"(?i)rightboat\.com/[^\s\"'<>]+"), "rightboat"),
+    (re.compile(r"(?i)annoncesbateau\.com/[^\s\"'<>]+"), "annoncesbateau"),
 ]
 
 URL_RE = re.compile(r"https?://[^\s\"'<>\)\]]+")

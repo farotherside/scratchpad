@@ -200,6 +200,16 @@
       ]
     },
     {
+      "id": "annoncesbateau",
+      "enabled": true,
+      "adapter": "generic_blocked",
+      "note": "Cloudflare 'Access Denied' from every automated client as of 2026-09-08 (robots.txt itself is refused). Blocked by client fingerprinting, not IP. Recover via its saved-search email alerts through the 'mail' site below.",
+      "index_urls": [
+        "https://www.annoncesbateau.com/annonces/voilier",
+        "https://www.annoncesbateau.com/"
+      ]
+    },
+    {
       "id": "mail",
       "enabled": false,
       "adapter": "mailbox",
